@@ -58,7 +58,7 @@ export default function Home() {
 
       <div className="flex min-h-0 flex-1 flex-col-reverse md:flex-row">
         {/* Sidebar */}
-        <aside className="flex min-h-0 w-full shrink-0 flex-col border-t md:w-105 md:border-t-0 md:border-r">
+        <aside className="flex max-h-[60dvh] min-h-0 w-full shrink-0 flex-col border-t md:max-h-none md:w-105 md:border-t-0 md:border-r">
           <div className="shrink-0 space-y-2.5 p-3">
             <PlaceSearch
               city={city}
@@ -128,7 +128,7 @@ export default function Home() {
         </aside>
 
         {/* Map */}
-        <main className="min-h-0 flex-1 basis-2/5 md:basis-auto">
+        <main className="min-h-[40dvh] flex-1 md:min-h-0">
           <TripMap
             city={city}
             stops={planner.stops}

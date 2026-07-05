@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Loader2, MapPin, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
@@ -30,10 +30,14 @@ export function PlaceSearch({
   const [highlight, setHighlight] = useState(0);
   const seq = useRef(0);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listId = useId();
 
   const localResults = useMemo(() => searchLocal(city, query), [city, query]);
   const results = merged?.q === query ? merged.places : localResults;
   const busy = Boolean(query.trim().length >= 3 && merged?.q !== query);
+  // Clamp against async result-list shrinkage.
+  const hi = results.length ? Math.min(highlight, results.length - 1) : -1;
+  const listOpen = open && Boolean(query.trim());
 
   useEffect(() => {
     if (query.trim().length < 3) return;
@@ -76,13 +80,16 @@ export function PlaceSearch({
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              setHighlight((h) => Math.min(h + 1, results.length - 1));
+              if (!listOpen) setOpen(true);
+              else setHighlight(Math.min(hi + 1, results.length - 1));
             } else if (e.key === "ArrowUp") {
               e.preventDefault();
-              setHighlight((h) => Math.max(h - 1, 0));
-            } else if (e.key === "Enter" && results[highlight]) {
-              e.preventDefault();
-              pick(results[highlight]);
+              setHighlight(Math.max(hi - 1, 0));
+            } else if (e.key === "Enter") {
+              if (listOpen && hi >= 0 && results[hi]) {
+                e.preventDefault();
+                pick(results[hi]);
+              }
             } else if (e.key === "Escape") {
               setOpen(false);
             }
@@ -91,7 +98,11 @@ export function PlaceSearch({
           className="pl-8"
           autoFocus={autoFocus}
           role="combobox"
-          aria-expanded={open && results.length > 0}
+          aria-expanded={listOpen}
+          aria-controls={listOpen ? listId : undefined}
+          aria-activedescendant={
+            listOpen && hi >= 0 ? `${listId}-opt-${hi}` : undefined
+          }
           aria-autocomplete="list"
         />
         {busy && (
@@ -99,8 +110,9 @@ export function PlaceSearch({
         )}
       </div>
 
-      {open && query.trim() && (
+      {listOpen && (
         <ul
+          id={listId}
           role="listbox"
           className="bg-popover text-popover-foreground absolute z-30 mt-1 max-h-72 w-full overflow-auto rounded-md border p-1 shadow-md"
         >
@@ -110,14 +122,20 @@ export function PlaceSearch({
             </li>
           )}
           {results.map((place, i) => (
-            <li key={place.id} role="option" aria-selected={i === highlight}>
+            <li
+              key={place.id}
+              id={`${listId}-opt-${i}`}
+              role="option"
+              aria-selected={i === hi}
+            >
               <button
                 type="button"
+                tabIndex={-1}
                 onMouseEnter={() => setHighlight(i)}
                 onClick={() => pick(place)}
                 className={cn(
                   "flex w-full items-start gap-2 rounded-sm px-2 py-1.5 text-left text-sm",
-                  i === highlight && "bg-accent text-accent-foreground",
+                  i === hi && "bg-accent text-accent-foreground",
                 )}
               >
                 <MapPin className="text-muted-foreground mt-0.5 size-3.5 shrink-0" />

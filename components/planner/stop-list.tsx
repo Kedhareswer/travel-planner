@@ -40,7 +40,7 @@ export function StopList({
                 </span>
               )}
             </span>
-            <span className="flex shrink-0 items-center opacity-40 transition-opacity group-hover:opacity-100">
+            <span className="flex shrink-0 items-center opacity-40 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
               <Button
                 variant="ghost"
                 size="icon"

@@ -32,61 +32,64 @@ export function OptionCard({
         selected ? "border-primary bg-primary/5" : "hover:bg-muted/50",
       )}
     >
-      <button
-        type="button"
-        onClick={onSelect}
-        className="flex w-full items-center gap-3 px-3 py-2.5 text-left"
-        aria-pressed={selected}
-      >
-        <span
-          className="flex size-8 shrink-0 items-center justify-center rounded-full"
-          style={{ backgroundColor: `${meta.color}1a`, color: meta.color }}
+      <div className="flex items-stretch">
+        <button
+          type="button"
+          onClick={onSelect}
+          className="flex min-w-0 flex-1 items-center gap-3 py-2.5 pl-3 text-left"
+          aria-pressed={selected}
         >
-          <ModeIcon kind={meta.kind} className="size-4" />
-        </span>
+          <span
+            className="flex size-8 shrink-0 items-center justify-center rounded-full"
+            style={{ backgroundColor: `${meta.color}1a`, color: meta.color }}
+          >
+            <ModeIcon kind={meta.kind} className="size-4" />
+          </span>
 
-        <span className="min-w-0 flex-1">
-          <span className="flex flex-wrap items-center gap-1.5">
-            <span className="text-sm font-medium">{meta.label}</span>
-            {badges.map((b) => (
-              <Badge
-                key={b}
-                variant={b === "Best" ? "default" : "secondary"}
-                className="h-4 px-1.5 text-[10px]"
-              >
-                {b}
-              </Badge>
-            ))}
+          <span className="min-w-0 flex-1">
+            <span className="flex flex-wrap items-center gap-1.5">
+              <span className="text-sm font-medium">{meta.label}</span>
+              {badges.map((b) => (
+                <Badge
+                  key={b}
+                  variant={b === "Best" ? "default" : "secondary"}
+                  className="h-4 px-1.5 text-[10px]"
+                >
+                  {b}
+                </Badge>
+              ))}
+            </span>
+            <span className="text-muted-foreground block truncate text-xs">
+              {option.summary}
+              {option.transfers > 0 &&
+                ` · ${option.transfers} transfer${option.transfers > 1 ? "s" : ""}`}
+              {option.walkKm > 0.15 && ` · ${formatKm(option.walkKm)} walk`}
+            </span>
           </span>
-          <span className="text-muted-foreground block truncate text-xs">
-            {option.summary}
-            {option.transfers > 0 &&
-              ` · ${option.transfers} transfer${option.transfers > 1 ? "s" : ""}`}
-            {option.walkKm > 0.15 && ` · ${formatKm(option.walkKm)} walk`}
-          </span>
-        </span>
 
-        <span className="shrink-0 text-right">
-          <span className="block text-sm font-semibold tabular-nums">
-            {formatMinRange(option.durationMin.low, option.durationMin.high)}
+          <span className="shrink-0 text-right">
+            <span className="block text-sm font-semibold tabular-nums">
+              {formatMinRange(option.durationMin.low, option.durationMin.high)}
+            </span>
+            <span className="text-muted-foreground block text-xs tabular-nums">
+              {formatPrice(option.price.low, option.price.high)}
+              {option.price.surgeProne && "*"}
+            </span>
           </span>
-          <span className="text-muted-foreground block text-xs tabular-nums">
-            {formatPrice(option.price.low, option.price.high)}
-            {option.price.surgeProne && "*"}
-          </span>
-        </span>
+        </button>
 
-        <ChevronDown
-          className={cn(
-            "text-muted-foreground size-4 shrink-0 transition-transform",
-            expanded && "rotate-180",
-          )}
-          onClick={(e) => {
-            e.stopPropagation();
-            setExpanded((x) => !x);
-          }}
-        />
-      </button>
+        <button
+          type="button"
+          onClick={() => setExpanded((x) => !x)}
+          aria-expanded={expanded}
+          aria-label={`${expanded ? "Hide" : "Show"} ${meta.label} details`}
+          className="text-muted-foreground hover:text-foreground flex shrink-0 items-center px-2.5"
+        >
+          <ChevronDown
+            className={cn("size-4 transition-transform", expanded && "rotate-180")}
+          />
+        </button>
+      </div>
 
       {expanded && (
         <div className="border-t px-3 py-2.5">

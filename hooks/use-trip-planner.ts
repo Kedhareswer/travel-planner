@@ -100,7 +100,13 @@ export function useTripPlanner(city: CityConfig) {
     });
   }, []);
 
-  const clearStops = useCallback(() => setStops([]), []);
+  const clearStops = useCallback(() => {
+    setStops([]);
+    // A cleared trip is a new trip — don't show the old plans while the
+    // next one computes (stale-while-revalidate is for tweaks, not resets).
+    setResult(null);
+    setSelectedByLeg({});
+  }, []);
 
   const optimizeOrder = useCallback(() => {
     setStops((s) => optimizeStopOrder(s));
@@ -119,7 +125,9 @@ export function useTripPlanner(city: CityConfig) {
   );
 
   const totals = useMemo(() => {
-    if (!selectedOptions.length) return null;
+    // Only total a complete trip — a leg with no selectable option would
+    // silently vanish from the sum and misstate the whole-trip cost/time.
+    if (!selectedOptions.length || selectedOptions.length !== plans.length) return null;
     return {
       priceLow: selectedOptions.reduce((n, o) => n + o.price.low, 0),
       priceHigh: selectedOptions.reduce((n, o) => n + o.price.high, 0),
