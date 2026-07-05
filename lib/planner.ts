@@ -181,6 +181,8 @@ export async function planLeg(
   // ---- Bus (indicative) ----
   if (!prefs.excludedModes.includes("bus") && roadKm >= 1.5) {
     const busKm = roadKm * 1.1; // buses detour via stops
+    const busWalkKm = 0.4; // typical walk to/from stops on the corridor
+    const busWalkMin = (busWalkKm / city.speeds.walk) * 60;
     const speed = speedFor(city, "bus");
     const ride = rideMinutes(busKm, speed, prefs.peakHours);
     const wait = city.speeds.busAvgWaitMin;
@@ -190,12 +192,23 @@ export async function planLeg(
       mode: "bus",
       legIndex,
       summary: `~${formatKm(busKm)} by bus`,
-      durationMin: { low: ride.low + wait * 0.6, high: ride.high + wait * 1.6 },
+      durationMin: {
+        low: ride.low + wait * 0.6 + busWalkMin,
+        high: ride.high + wait * 1.6 + busWalkMin,
+      },
       price: { low: fare, high: Math.round(fare * 1.6), surgeProne: false },
       distanceKm: busKm,
-      walkKm: 0.4,
+      walkKm: busWalkKm,
       transfers: 0,
       steps: [
+        {
+          kind: "walk",
+          label: "Walk to/from bus stops",
+          detail: formatKm(busWalkKm),
+          distanceKm: busWalkKm,
+          durationMin: busWalkMin,
+          geometry: [],
+        },
         { kind: "wait", label: "Wait for bus", distanceKm: 0, durationMin: wait, geometry: [] },
         {
           kind: "bus",
@@ -333,8 +346,10 @@ function buildMetroOption(
   });
   if (ride.transfers > 0) notes.push(`${ride.transfers} interchange${ride.transfers > 1 ? "s" : ""}`);
 
-  // Egress leg
-  const egress = accessLeg(city, ride.exit.lngLat, to.lngLat, exitKm, to.name, stationWalkMax);
+  // Egress leg — the walk budget is per whole leg, so spend what the
+  // access walk left over (an auto hop takes over past the remainder).
+  const egressWalkMax = Math.max(0, Math.min(stationWalkMax, prefs.maxWalkKm - access.walkKm));
+  const egress = accessLeg(city, ride.exit.lngLat, to.lngLat, exitKm, to.name, egressWalkMax);
   steps.push(egress.step);
   priceLow += egress.price.low;
   priceHigh += egress.price.high;
