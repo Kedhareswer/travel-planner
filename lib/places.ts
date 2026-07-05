@@ -102,3 +102,38 @@ export async function searchPlaces(query: string, bias?: LngLat): Promise<Place[
   const seen = new Set(local.map((p) => p.name.toLowerCase()));
   return [...local, ...remote.filter((p) => !seen.has(p.name.toLowerCase()))].slice(0, 8);
 }
+
+/**
+ * Name + country for a coordinate (used for "my location") via Photon
+ * reverse geocoding — occasional interactive lookups are within its
+ * fair-use policy. Falls back to a bare "My location" place.
+ */
+export async function reversePlace(lngLat: LngLat): Promise<Place> {
+  const fallback: Place = {
+    id: `me-${lngLat[0].toFixed(5)},${lngLat[1].toFixed(5)}`,
+    name: "My location",
+    lngLat,
+    source: "photon",
+  };
+  try {
+    const res = await fetch(
+      `https://photon.komoot.io/reverse?lat=${lngLat[1]}&lon=${lngLat[0]}&limit=1`,
+      { signal: AbortSignal.timeout(3500) },
+    );
+    if (!res.ok) return fallback;
+    const data = (await res.json()) as { features: PhotonFeature[] };
+    const f = data.features?.[0];
+    if (!f) return fallback;
+    return {
+      ...fallback,
+      name: "My location",
+      area:
+        [f.properties.name ?? f.properties.street, f.properties.city ?? f.properties.state]
+          .filter(Boolean)
+          .join(", ") || undefined,
+      countryCode: f.properties.countrycode?.toLowerCase(),
+    };
+  } catch {
+    return fallback;
+  }
+}

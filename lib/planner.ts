@@ -274,8 +274,7 @@ async function transitOptions(
 
   // Tier 1 — curated pack network (best data, includes real fares)
   if (region.metro) {
-    const opt = buildRailOption(region, region.metro, from, to, legIndex, prefs, "curated");
-    if (opt) out.push(opt);
+    out.push(...buildRailOptions(region, region.metro, from, to, legIndex, prefs, "curated"));
   } else {
     // Tier 2 — Transitous scheduled routing (real timetables worldwide,
     // where coverage exists)
@@ -286,8 +285,7 @@ async function transitOptions(
       // Tier 3 — OSM-derived rail graph
       const net = await osmRailNetwork(from.lngLat, to.lngLat);
       if (net) {
-        const opt = buildRailOption(region, net, from, to, legIndex, prefs, "estimated");
-        if (opt) out.push(opt);
+        out.push(...buildRailOptions(region, net, from, to, legIndex, prefs, "estimated"));
       }
     }
   }
@@ -358,8 +356,15 @@ function transitousOption(
   };
 }
 
-/** Shared rail-graph option builder (curated pack or OSM-derived). */
-function buildRailOption(
+/**
+ * Rail-graph journey builder (curated pack or OSM-derived network).
+ *
+ * Returns up to two variants so the user picks the first/last mile
+ * explicitly: one that walks to/from the stations wherever that's within
+ * tolerance, and one that takes the region's quick paid hop (auto, moto,
+ * cab — whatever is local) to skip the walking.
+ */
+function buildRailOptions(
   region: RegionProfile,
   net: MetroNetwork,
   from: Place,
@@ -367,10 +372,10 @@ function buildRailOption(
   legIndex: number,
   prefs: TripPreferences,
   dataTier: "curated" | "estimated",
-): RouteOption | null {
+): RouteOption[] {
   const entries = nearestStations(net, from.lngLat, 2);
   const exits = nearestStations(net, to.lngLat, 2);
-  if (!entries.length || !exits.length) return null;
+  if (!entries.length || !exits.length) return [];
   const stationWalkMax = Math.min(STATION_WALK_MAX_KM, prefs.maxWalkKm);
 
   // Score = ride time + access/egress at walking pace + transfer aversion.
@@ -389,100 +394,132 @@ function buildRailOption(
       }
     }
   }
-  if (!best) return null;
+  if (!best) return [];
   const { ride, entryKm, exitKm } = best;
 
   const crowKm = haversineKm(from.lngLat, to.lngLat);
-  if (crowKm < 1 || ride.distanceKm < 1 || ride.distanceKm < crowKm * 0.45) return null;
+  if (crowKm < 1 || ride.distanceKm < 1 || ride.distanceKm < crowKm * 0.45) return [];
 
   // Fare: real slabs when the network has them, else the region band.
   const fareLow = ride.fare ?? region.transitFare.metro[0];
   const fareHigh = ride.fare ?? region.transitFare.metro[1];
+  const baseLabel = dataTier === "curated" ? "Metro" : "Metro / rail";
 
-  const steps: RouteStep[] = [];
-  const notes: string[] = [];
-  let priceLow = fareLow;
-  let priceHigh = fareHigh;
-  let walkTotal = 0;
+  const buildVariant = (
+    force: "walk" | "hop" | undefined,
+    idSuffix: string,
+    label: string,
+  ): RouteOption => {
+    const steps: RouteStep[] = [];
+    const notes: string[] = [];
+    let priceLow = fareLow;
+    let priceHigh = fareHigh;
+    let walkTotal = 0;
 
-  const access = accessLeg(region, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} station`, stationWalkMax);
-  steps.push(access.step);
-  priceLow += access.price.low;
-  priceHigh += access.price.high;
-  walkTotal += access.walkKm;
+    const access = accessLeg(region, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} station`, stationWalkMax, force);
+    steps.push(access.step);
+    priceLow += access.price.low;
+    priceHigh += access.price.high;
+    walkTotal += access.walkKm;
 
-  steps.push({
-    kind: "wait",
-    label: "Ticket + platform wait",
-    distanceKm: 0,
-    durationMin: net.avgWaitMin,
-    geometry: [],
-  });
-
-  ride.segments.forEach((seg, i) => {
-    if (i > 0) {
-      steps.push({
-        kind: "transfer",
-        label: `Interchange at ${seg.stations[0].name}`,
-        distanceKm: 0,
-        durationMin: net.interchangePenaltyMin,
-        geometry: [],
-      });
-    }
     steps.push({
-      kind: "metro",
-      label: `${seg.line.name} · ${seg.stations[0].name} → ${seg.stations[seg.stations.length - 1].name}`,
-      detail: `${seg.stations.length - 1} stops`,
-      distanceKm: seg.distanceKm,
-      durationMin: seg.durationMin,
-      geometry: seg.stations.map((s) => s.lngLat),
-      color: seg.line.color,
+      kind: "wait",
+      label: "Ticket + platform wait",
+      distanceKm: 0,
+      durationMin: net.avgWaitMin,
+      geometry: [],
     });
-  });
-  if (ride.transfers > 0) notes.push(`${ride.transfers} interchange${ride.transfers > 1 ? "s" : ""}`);
 
-  const egressWalkMax = Math.max(0, Math.min(stationWalkMax, prefs.maxWalkKm - access.walkKm));
-  const egress = accessLeg(region, ride.exit.lngLat, to.lngLat, exitKm, to.name, egressWalkMax);
-  steps.push(egress.step);
-  priceLow += egress.price.low;
-  priceHigh += egress.price.high;
-  walkTotal += egress.walkKm;
+    ride.segments.forEach((seg, i) => {
+      if (i > 0) {
+        steps.push({
+          kind: "transfer",
+          label: `Interchange at ${seg.stations[0].name}`,
+          distanceKm: 0,
+          durationMin: net.interchangePenaltyMin,
+          geometry: [],
+        });
+      }
+      steps.push({
+        kind: "metro",
+        label: `${seg.line.name} · ${seg.stations[0].name} → ${seg.stations[seg.stations.length - 1].name}`,
+        detail: `${seg.stations.length - 1} stops`,
+        distanceKm: seg.distanceKm,
+        durationMin: seg.durationMin,
+        geometry: seg.stations.map((s) => s.lngLat),
+        color: seg.line.color,
+      });
+    });
+    if (ride.transfers > 0) notes.push(`${ride.transfers} interchange${ride.transfers > 1 ? "s" : ""}`);
 
-  const rideMin = ride.durationMin + net.avgWaitMin;
-  const low = rideMin + access.durationMin.low + egress.durationMin.low;
-  const high = rideMin * 1.1 + access.durationMin.high + egress.durationMin.high;
+    const egressWalkMax =
+      force === "walk"
+        ? stationWalkMax
+        : Math.max(0, Math.min(stationWalkMax, prefs.maxWalkKm - access.walkKm));
+    const egress = accessLeg(region, ride.exit.lngLat, to.lngLat, exitKm, to.name, egressWalkMax, force);
+    steps.push(egress.step);
+    priceLow += egress.price.low;
+    priceHigh += egress.price.high;
+    walkTotal += egress.walkKm;
 
-  if (dataTier === "curated") {
-    if (ride.fare !== null) notes.push(`Metro fare ${region.currency === "INR" ? "₹" : ""}${ride.fare}`);
-    if (net.firstTrain && net.lastTrain) notes.push(`Trains ${net.firstTrain}–${net.lastTrain}`);
-  } else {
-    notes.push("Network from OpenStreetMap; fares are a local estimate band");
-  }
+    const rideMin = ride.durationMin + net.avgWaitMin;
+    const low = rideMin + access.durationMin.low + egress.durationMin.low;
+    const high = rideMin * 1.1 + access.durationMin.high + egress.durationMin.high;
 
-  return {
-    id: oid("metro", legIndex),
-    mode: "metro",
-    label: dataTier === "curated" ? "Metro" : "Metro / rail",
-    kind: "metro",
-    color: "#0ea5e9",
-    legIndex,
-    summary: `${ride.entry.name} → ${ride.exit.name}`,
-    durationMin: { low, high },
-    price: {
-      low: Math.round(priceLow),
-      high: Math.round(priceHigh),
-      currency: region.currency,
-      surgeProne: access.price.surgeProne || egress.price.surgeProne,
-    },
-    distanceKm: ride.distanceKm + entryKm + exitKm,
-    walkKm: walkTotal,
-    transfers: ride.transfers,
-    steps,
-    bookingUrl: googleMapsLink(from, to, "transit"),
-    bookingLabel: "Transit directions",
-    notes,
-    dataTier,
+    if (dataTier === "curated") {
+      if (ride.fare !== null) notes.push(`Metro fare ${region.currency === "INR" ? "₹" : ""}${ride.fare}`);
+      if (net.firstTrain && net.lastTrain) notes.push(`Trains ${net.firstTrain}–${net.lastTrain}`);
+    } else {
+      notes.push("Network from OpenStreetMap; fares are a local estimate band");
+    }
+
+    return {
+      id: oid(idSuffix, legIndex),
+      mode: idSuffix,
+      label,
+      kind: "metro",
+      color: "#0ea5e9",
+      legIndex,
+      summary: `${ride.entry.name} → ${ride.exit.name}`,
+      durationMin: { low, high },
+      price: {
+        low: Math.round(priceLow),
+        high: Math.round(priceHigh),
+        currency: region.currency,
+        surgeProne: access.price.surgeProne || egress.price.surgeProne,
+      },
+      distanceKm: ride.distanceKm + entryKm + exitKm,
+      walkKm: walkTotal,
+      transfers: ride.transfers,
+      steps,
+      bookingUrl: googleMapsLink(from, to, "transit"),
+      bookingLabel: "Transit directions",
+      notes,
+      dataTier,
+    };
   };
+
+  // Primary variant: walk where tolerable, hop where not (auto choice).
+  const primary = buildVariant(undefined, "metro", baseLabel);
+
+  // Hop variant: skip the station walks entirely — only worth offering when
+  // it actually changes the journey (a forced hop still walks distances
+  // under 250 m, so trivial-walk trips would produce an identical twin).
+  const hop = quickHopMode(region);
+  if (hop && primary.walkKm >= 0.4) {
+    const hopVariant = buildVariant("hop", "metro-hop", `${baseLabel} + ${hop.label}`);
+    if (hopVariant.walkKm < primary.walkKm - 0.05) return [primary, hopVariant];
+  }
+  return [primary];
+}
+
+/** The region's cheapest quick paid hop for first/last-mile (auto > moto > cab). */
+function quickHopMode(region: RegionProfile) {
+  return (
+    region.roadModes.find((m) => m.kind === "auto") ??
+    region.roadModes.find((m) => m.kind === "bike") ??
+    region.roadModes[0]
+  );
 }
 
 function busHeuristicOption(
@@ -537,7 +574,7 @@ function busHeuristicOption(
       { kind: "wait", label: "Wait for bus", distanceKm: 0, durationMin: wait, geometry: [] },
       {
         kind: "bus",
-        label: `Bus toward ${to.name}`,
+        label: `Bus · toward ${to.name}`,
         detail: "Route availability varies",
         distanceKm: busKm,
         durationMin: (ride.low + ride.high) / 2,
@@ -551,7 +588,11 @@ function busHeuristicOption(
   };
 }
 
-/** Walk if close, otherwise a short paid hop — the first/last-mile reality. */
+/**
+ * First/last-mile leg: walk if close, otherwise a short paid hop.
+ * `force` pins the choice so journey variants can differ deliberately
+ * (a forced hop still walks trivial distances under 250 m).
+ */
 function accessLeg(
   region: RegionProfile,
   from: [number, number],
@@ -559,6 +600,7 @@ function accessLeg(
   crowKm: number,
   destLabel: string,
   walkMaxKm: number,
+  force?: "walk" | "hop",
 ): {
   step: RouteStep;
   price: PriceBand;
@@ -566,7 +608,10 @@ function accessLeg(
   walkKm: number;
 } {
   const walkKm = crowKm * 1.25;
-  if (walkKm <= walkMaxKm) {
+  const shouldWalk =
+    force === "walk" ||
+    (force === "hop" ? crowKm < 0.25 : walkKm <= walkMaxKm);
+  if (shouldWalk) {
     const mins = (walkKm / region.speeds.walk) * 60;
     return {
       step: {
@@ -583,10 +628,7 @@ function accessLeg(
     };
   }
   // Short paid hop with the cheapest quick road mode available here
-  const hop =
-    region.roadModes.find((m) => m.kind === "auto") ??
-    region.roadModes.find((m) => m.kind === "bike") ??
-    region.roadModes[0];
+  const hop = quickHopMode(region);
   const roadKm = crowKm * region.speeds.detourIndex;
   const kind = hop?.kind ?? "auto";
   const speed = speedForKind(region, kind);

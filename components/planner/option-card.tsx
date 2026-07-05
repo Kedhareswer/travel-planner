@@ -1,14 +1,38 @@
 "use client";
 
 import { useState } from "react";
-import { AlertTriangle, ChevronDown, ExternalLink, Info } from "lucide-react";
+import {
+  AlertTriangle,
+  ChevronDown,
+  ChevronRight,
+  ExternalLink,
+  Info,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { formatKm, formatMinRange } from "@/lib/geo";
 import { formatMoneyRange } from "@/lib/region";
-import type { RegionProfile, RouteOption } from "@/lib/types";
+import type { ModeKind, RegionProfile, RouteOption, RouteStep } from "@/lib/types";
 import { ModeIcon } from "./mode-icon";
+
+/**
+ * Journey chips: the door-to-door composition at a glance —
+ * 🚶 6m › Ⓜ Red Line › 🛺 5m — for any option with multiple travel legs.
+ */
+function journeyChips(option: RouteOption): { kind: ModeKind; text: string; color?: string }[] | null {
+  const legs = option.steps.filter(
+    (s): s is RouteStep & { kind: ModeKind } => s.kind !== "wait" && s.kind !== "transfer",
+  );
+  if (legs.length < 2) return null;
+  return legs.map((s) => {
+    if (["metro", "train", "tram", "bus", "ferry"].includes(s.kind)) {
+      const line = s.label.split("·")[0].trim();
+      return { kind: s.kind, text: line, color: s.color };
+    }
+    return { kind: s.kind, text: `${Math.max(1, Math.round(s.durationMin))} min` };
+  });
+}
 
 /** One selectable mode option for a leg, with expandable step details. */
 export function OptionCard({
@@ -25,12 +49,15 @@ export function OptionCard({
   onSelect: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const chips = journeyChips(option);
 
   return (
     <div
       className={cn(
-        "rounded-lg border transition-colors",
-        selected ? "border-primary bg-primary/5" : "hover:bg-muted/50",
+        "rounded-lg border transition-all",
+        selected
+          ? "border-primary bg-primary/5 ring-primary/30 ring-1"
+          : "hover:bg-muted/50",
       )}
     >
       <div className="flex items-stretch">
@@ -68,12 +95,32 @@ export function OptionCard({
                 </Badge>
               )}
             </span>
-            <span className="text-muted-foreground block truncate text-xs">
-              {option.summary}
-              {option.transfers > 0 &&
-                ` · ${option.transfers} transfer${option.transfers > 1 ? "s" : ""}`}
-              {option.walkKm > 0.15 && ` · ${formatKm(option.walkKm)} walk`}
-            </span>
+            {chips ? (
+              <span className="mt-0.5 flex flex-wrap items-center gap-x-1 gap-y-0.5">
+                {chips.map((chip, i) => (
+                  <span key={i} className="flex items-center gap-1">
+                    {i > 0 && (
+                      <ChevronRight className="text-muted-foreground/60 size-3" />
+                    )}
+                    <span
+                      className={cn(
+                        "flex items-center gap-0.5 rounded px-1 py-px text-[11px]",
+                        chip.color ? "font-medium text-white" : "bg-muted text-muted-foreground",
+                      )}
+                      style={chip.color ? { backgroundColor: chip.color } : undefined}
+                    >
+                      <ModeIcon kind={chip.kind} className="size-3" />
+                      {chip.text}
+                    </span>
+                  </span>
+                ))}
+              </span>
+            ) : (
+              <span className="text-muted-foreground block truncate text-xs">
+                {option.summary}
+                {option.walkKm > 0.15 && ` · ${formatKm(option.walkKm)} walk`}
+              </span>
+            )}
           </span>
 
           <span className="shrink-0 text-right">

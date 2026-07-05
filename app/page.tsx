@@ -1,12 +1,16 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import {
   ChevronDown,
   Globe2,
   Loader2,
+  LocateFixed,
   Navigation,
   TriangleAlert,
 } from "lucide-react";
+import { toast } from "sonner";
+import { reversePlace } from "@/lib/places";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -52,12 +56,37 @@ const SAMPLES: { label: string; stops: Omit<Place, "source">[] }[] = [
 
 export default function Home() {
   const planner = useTripPlanner();
-  const { region } = planner;
+  const { region, addStop } = planner;
+  const [locating, setLocating] = useState(false);
 
   const loadSample = (stops: Omit<Place, "source">[]) => {
     planner.clearStops();
     for (const s of stops) planner.addStop({ ...s, source: "local" });
   };
+
+  const useMyLocation = useCallback(() => {
+    if (!("geolocation" in navigator)) {
+      toast.error("Location isn't available in this browser");
+      return;
+    }
+    setLocating(true);
+    navigator.geolocation.getCurrentPosition(
+      async (pos) => {
+        const place = await reversePlace([pos.coords.longitude, pos.coords.latitude]);
+        addStop(place);
+        setLocating(false);
+      },
+      (err) => {
+        setLocating(false);
+        toast.error(
+          err.code === err.PERMISSION_DENIED
+            ? "Location permission denied — allow it in your browser settings"
+            : "Couldn't get your location",
+        );
+      },
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
+  }, [addStop]);
 
   return (
     <div className="flex h-dvh flex-col">
@@ -83,15 +112,33 @@ export default function Home() {
         {/* Sidebar */}
         <aside className="flex max-h-[60dvh] min-h-0 w-full shrink-0 flex-col border-t md:max-h-none md:w-105 md:border-t-0 md:border-r">
           <div className="shrink-0 space-y-2.5 p-3">
-            <PlaceSearch
-              bias={planner.stops[planner.stops.length - 1]?.lngLat}
-              onSelect={planner.addStop}
-              placeholder={
-                planner.stops.length === 0
-                  ? "Where are you starting from?"
-                  : "Add the next stop…"
-              }
-            />
+            <div className="flex gap-1.5">
+              <div className="min-w-0 flex-1">
+                <PlaceSearch
+                  bias={planner.stops[planner.stops.length - 1]?.lngLat}
+                  onSelect={planner.addStop}
+                  placeholder={
+                    planner.stops.length === 0
+                      ? "Where are you starting from?"
+                      : "Add the next stop…"
+                  }
+                />
+              </div>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={useMyLocation}
+                disabled={locating}
+                aria-label="Add my current location as a stop"
+                title="Use my current location"
+              >
+                {locating ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <LocateFixed className="size-4" />
+                )}
+              </Button>
+            </div>
             <StopList
               stops={planner.stops}
               onRemove={planner.removeStop}
@@ -103,7 +150,7 @@ export default function Home() {
 
           <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-3">
             {planner.stops.length < 2 ? (
-              <EmptyState onSample={loadSample} />
+              <EmptyState onSample={loadSample} onUseLocation={useMyLocation} />
             ) : (
               <div className="space-y-4">
                 {region.tier === "default" && (
@@ -116,7 +163,9 @@ export default function Home() {
                 )}
 
                 {planner.totals && (
-                  <TripSummary totals={planner.totals} region={region} />
+                  <div className="bg-background/95 sticky top-0 z-10 -mx-1 px-1 pb-1 backdrop-blur-sm">
+                    <TripSummary totals={planner.totals} region={region} />
+                  </div>
                 )}
 
                 <Collapsible>
@@ -188,8 +237,10 @@ export default function Home() {
 
 function EmptyState({
   onSample,
+  onUseLocation,
 }: {
   onSample: (stops: Omit<Place, "source">[]) => void;
+  onUseLocation: () => void;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-3 py-10 text-center">
@@ -203,6 +254,10 @@ function EmptyState({
           bike taxis by price and time, in the local currency.
         </p>
       </div>
+      <Button size="sm" onClick={onUseLocation} className="gap-1.5">
+        <LocateFixed className="size-3.5" />
+        Start from my location
+      </Button>
       <div className="flex flex-col gap-1.5">
         {SAMPLES.map((s) => (
           <Button
