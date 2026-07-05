@@ -3,19 +3,21 @@
 import { MoveRight } from "lucide-react";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cheapestOf, fastestOf, generalizedCost } from "@/lib/planner";
-import type { LegPlan, TripPreferences } from "@/lib/types";
+import type { LegPlan, RegionProfile, TripPreferences } from "@/lib/types";
 import { OptionCard } from "./option-card";
 
 /** All legs with their mode options; one option selectable per leg. */
 export function LegPlans({
   plans,
   planning,
+  region,
   prefs,
   selected,
   onSelect,
 }: {
   plans: LegPlan[];
   planning: boolean;
+  region: RegionProfile;
   prefs: TripPreferences;
   selected: Record<number, string>;
   onSelect: (legIndex: number, optionId: string) => void;
@@ -60,11 +62,12 @@ export function LegPlans({
                 if (option.id === best?.id) badges.push("Best");
                 if (option.id === fastest?.id) badges.push("Fastest");
                 if (option.id === cheapest?.id && option.price.high > 0) badges.push("Cheapest");
-                if (option.mode === "walk" && option.price.high === 0) badges.push("Free");
+                if (option.price.high === 0) badges.push("Free");
                 return (
                   <OptionCard
                     key={option.id}
                     option={option}
+                    region={region}
                     selected={selected[leg.legIndex] === option.id}
                     badges={badges}
                     onSelect={() => onSelect(leg.legIndex, option.id)}

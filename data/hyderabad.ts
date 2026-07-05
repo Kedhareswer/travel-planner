@@ -1,12 +1,13 @@
-import type { CityConfig, MetroStation } from "@/lib/types";
+import type { MetroStation, RegionProfile } from "@/lib/types";
 
 /**
- * Hyderabad city dataset.
+ * Hyderabad curated city pack — the highest-quality data tier.
  *
- * Station/place coordinates are curated approximations (good to a few hundred
- * meters — enough for walk-distance and fare-slab estimates, not navigation).
- * Fares follow published fare cards and the Dec 2024 HMRL fare revision;
- * they are estimates and drift with time — see the in-app disclaimer.
+ * Station coordinates come from the official HMRL GTFS (June 2022 open-data
+ * release); metro fares follow the chart effective 24 May 2025; road fares
+ * are calibrated to observed Hyderabad app fares (2025-26); speeds from the
+ * TomTom Traffic Index 2025. Numbers drift — this file is the one place to
+ * re-calibrate them.
  */
 
 const st = (
@@ -85,10 +86,14 @@ const STATIONS: MetroStation[] = [
   st("sultanbazar", "Sultan Bazaar", 17.384447, 78.484024, ["green"]),
 ];
 
-export const HYDERABAD: CityConfig = {
-  id: "hyderabad",
+
+export const HYDERABAD_PACK: RegionProfile = {
+  id: "city:hyderabad",
   name: "Hyderabad",
-  center: [78.4772, 17.4065],
+  countryCode: "in",
+  currency: "INR",
+  locale: "en-IN",
+  tier: "curated",
   bbox: [78.24, 17.2, 78.72, 17.62],
 
   metro: {
@@ -153,88 +158,55 @@ export const HYDERABAD: CityConfig = {
 
   /*
    * Heuristic fare cards calibrated to observed Hyderabad app fares (2025-26).
-   * None of Uber/Rapido/Ola expose a public estimates API anymore, so like
-   * every fare-comparison product these are fare-card estimates, not quotes.
-   * Surge is legally bounded to 2× base by the MV Aggregator Guidelines 2025;
-   * typical observed peak/rain surge is 1.2-1.8×.
+   * Surge is legally bounded to 2x base by the MV Aggregator Guidelines 2025;
+   * typical observed peak/rain surge is 1.2-1.8x.
    */
-  fareCards: [
+  roadModes: [
     {
-      mode: "uber-go",
-      baseFare: 42,
-      baseKm: 2,
-      perKm: 10.5,
-      perMin: 0.8,
-      minFare: 60,
-      band: [0.9, 1.3],
-      surgeProne: true,
+      id: "uber-go", label: "Uber Go", kind: "cab", provider: "uber", color: "#171717",
+      pickupWaitMin: [3, 8],
+      fare: { baseFare: 42, baseKm: 2, perKm: 10.5, perMin: 0.8, minFare: 60, band: [0.9, 1.3], surgeProne: true },
     },
     {
-      mode: "uber-auto",
-      baseFare: 26,
-      baseKm: 1.5,
-      perKm: 12,
-      perMin: 0.5,
-      minFare: 40,
-      band: [0.9, 1.3],
-      surgeProne: true,
+      id: "uber-auto", label: "Uber Auto", kind: "auto", provider: "uber", color: "#f59e0b",
+      pickupWaitMin: [2, 6],
+      fare: { baseFare: 26, baseKm: 1.5, perKm: 12, perMin: 0.5, minFare: 40, band: [0.9, 1.3], surgeProne: true },
     },
     {
-      mode: "uber-moto",
-      baseFare: 18,
-      baseKm: 1.5,
-      perKm: 8,
-      perMin: 0.4,
-      minFare: 27,
-      band: [0.9, 1.3],
-      surgeProne: true,
+      id: "uber-moto", label: "Uber Moto", kind: "bike", provider: "uber", color: "#dc2626",
+      pickupWaitMin: [2, 5],
+      fare: { baseFare: 18, baseKm: 1.5, perKm: 8, perMin: 0.4, minFare: 27, band: [0.9, 1.3], surgeProne: true },
     },
     {
-      mode: "rapido-bike",
-      baseFare: 20,
-      baseKm: 1.6,
-      perKm: 9.5,
-      minFare: 30,
-      band: [0.9, 1.25],
-      surgeProne: true,
+      id: "rapido-bike", label: "Rapido Bike", kind: "bike", provider: "rapido", color: "#f43f5e",
+      pickupWaitMin: [2, 5],
+      fare: { baseFare: 20, baseKm: 1.6, perKm: 9.5, minFare: 30, band: [0.9, 1.25], surgeProne: true },
     },
     {
-      mode: "rapido-auto",
-      baseFare: 30,
-      baseKm: 1.5,
-      perKm: 14,
-      minFare: 35,
-      band: [0.9, 1.25],
-      surgeProne: true,
+      id: "rapido-auto", label: "Rapido Auto", kind: "auto", provider: "rapido", color: "#f97316",
+      pickupWaitMin: [2, 6],
+      fare: { baseFare: 30, baseKm: 1.5, perKm: 14, minFare: 35, band: [0.9, 1.25], surgeProne: true },
     },
     {
-      mode: "rapido-cab",
-      baseFare: 45,
-      baseKm: 2,
-      perKm: 15,
-      perMin: 1,
-      minFare: 60,
-      band: [0.9, 1.3],
-      surgeProne: true,
+      id: "rapido-cab", label: "Rapido Cab", kind: "cab", provider: "rapido", color: "#8b5cf6",
+      pickupWaitMin: [3, 8],
+      fare: { baseFare: 45, baseKm: 2, perKm: 15, perMin: 1, minFare: 60, band: [0.9, 1.3], surgeProne: true },
     },
     {
-      mode: "auto",
-      baseFare: 20,
-      baseKm: 1.6,
-      perKm: 11,
-      minFare: 20,
-      band: [1.2, 2.2],
-      surgeProne: false,
-      notes: [
-        "Official meter (₹20 first 1.6 km + ₹11/km, unrevised since 2014) — street autos usually quote well above it; 1.5× after 11 PM",
-      ],
+      id: "auto-meter", label: "Auto (meter)", kind: "auto", color: "#eab308",
+      pickupWaitMin: [1, 4],
+      fare: {
+        baseFare: 20, baseKm: 1.6, perKm: 11, minFare: 20, band: [1.2, 2.2], surgeProne: false,
+        notes: ["Official meter (Rs 20 first 1.6 km + Rs 11/km, unrevised since 2014) — street autos usually quote well above it; 1.5x after 11 PM"],
+      },
     },
   ],
 
   // Speeds from TomTom Traffic Index 2025 (car peak 16.1 / off-peak 18.4 km/h)
-  // and IRC 103-2012 walking speed; [peak, off-peak] km/h.
+  // and IRC 103-2012 walking speed; [peak, offPeak] km/h.
   speeds: {
     walk: 4.3,
+    cycle: 12,
     bike: [19, 25],
     auto: [14, 18],
     car: [15, 21],
@@ -244,7 +216,6 @@ export const HYDERABAD: CityConfig = {
   },
 
   // TSRTC city slabs — [maxKm, fare INR], blended Ordinary/Metro Express
-  // (Ordinary min ₹10 covers ~10 km; Express min ₹15; city max ~₹30-40)
   busFareSlabsKm: [
     [6, 10],
     [10, 15],
@@ -252,6 +223,11 @@ export const HYDERABAD: CityConfig = {
     [22, 30],
     [999, 35],
   ],
+  transitFare: { metro: [11, 69], bus: [10, 35] },
+
+  cycling: true,
+  valueOfTimePresets: [50, 100, 150, 300, 600],
+  valueOfTimeDefault: 150,
 
   places: [
     { id: "hyd-ameerpet", name: "Ameerpet", area: "Hyderabad", lngLat: [78.4483, 17.4375] },
@@ -316,5 +292,3 @@ export const HYDERABAD: CityConfig = {
     { id: "hyd-ramoji", name: "Ramoji Film City", area: "Abdullahpurmet", lngLat: [78.6808, 17.2543] },
   ],
 };
-
-export const CITIES: CityConfig[] = [HYDERABAD];

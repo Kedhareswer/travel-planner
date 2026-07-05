@@ -23,7 +23,8 @@ export interface MetroRide {
   distanceKm: number;
   /** ride time incl. interchange walk, excl. platform wait */
   durationMin: number;
-  fare: number;
+  /** null when the network has no fare table (region band fills in) */
+  fare: number | null;
 }
 
 interface Node {
@@ -103,7 +104,8 @@ export function nearestStations(
     .slice(0, count);
 }
 
-export function metroFare(net: MetroNetwork, riddenKm: number): number {
+export function metroFare(net: MetroNetwork, riddenKm: number): number | null {
+  if (!net.fareSlabsKm) return null;
   for (const [maxKm, fare] of net.fareSlabsKm) {
     if (riddenKm <= maxKm) return fare;
   }

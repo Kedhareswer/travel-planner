@@ -5,25 +5,26 @@ import { AlertTriangle, ChevronDown, ExternalLink, Info } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { formatKm, formatMinRange, formatPrice } from "@/lib/geo";
-import { modeMeta } from "@/lib/modes";
-import type { RouteOption } from "@/lib/types";
+import { formatKm, formatMinRange } from "@/lib/geo";
+import { formatMoneyRange } from "@/lib/region";
+import type { RegionProfile, RouteOption } from "@/lib/types";
 import { ModeIcon } from "./mode-icon";
 
 /** One selectable mode option for a leg, with expandable step details. */
 export function OptionCard({
   option,
+  region,
   selected,
   badges,
   onSelect,
 }: {
   option: RouteOption;
+  region: RegionProfile;
   selected: boolean;
   badges: string[];
   onSelect: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const meta = modeMeta(option.mode);
 
   return (
     <div
@@ -41,14 +42,14 @@ export function OptionCard({
         >
           <span
             className="flex size-8 shrink-0 items-center justify-center rounded-full"
-            style={{ backgroundColor: `${meta.color}1a`, color: meta.color }}
+            style={{ backgroundColor: `${option.color}1a`, color: option.color }}
           >
-            <ModeIcon kind={meta.kind} className="size-4" />
+            <ModeIcon kind={option.kind} className="size-4" />
           </span>
 
           <span className="min-w-0 flex-1">
             <span className="flex flex-wrap items-center gap-1.5">
-              <span className="text-sm font-medium">{meta.label}</span>
+              <span className="text-sm font-medium">{option.label}</span>
               {badges.map((b) => (
                 <Badge
                   key={b}
@@ -58,6 +59,14 @@ export function OptionCard({
                   {b}
                 </Badge>
               ))}
+              {option.dataTier === "live" && (
+                <Badge
+                  variant="outline"
+                  className="h-4 border-sky-500/40 px-1.5 text-[10px] text-sky-600 dark:text-sky-400"
+                >
+                  Live
+                </Badge>
+              )}
             </span>
             <span className="text-muted-foreground block truncate text-xs">
               {option.summary}
@@ -72,7 +81,7 @@ export function OptionCard({
               {formatMinRange(option.durationMin.low, option.durationMin.high)}
             </span>
             <span className="text-muted-foreground block text-xs tabular-nums">
-              {formatPrice(option.price.low, option.price.high)}
+              {formatMoneyRange(option.price.low, option.price.high, region)}
               {option.price.surgeProne && "*"}
             </span>
           </span>
@@ -82,7 +91,7 @@ export function OptionCard({
           type="button"
           onClick={() => setExpanded((x) => !x)}
           aria-expanded={expanded}
-          aria-label={`${expanded ? "Hide" : "Show"} ${meta.label} details`}
+          aria-label={`${expanded ? "Hide" : "Show"} ${option.label} details`}
           className="text-muted-foreground hover:text-foreground flex shrink-0 items-center px-2.5"
         >
           <ChevronDown
@@ -98,7 +107,7 @@ export function OptionCard({
               <li key={i} className="flex items-start gap-2 text-xs">
                 <span
                   className="mt-1 size-2 shrink-0 rounded-full"
-                  style={{ backgroundColor: step.color ?? meta.color }}
+                  style={{ backgroundColor: step.color ?? option.color }}
                 />
                 <span className="min-w-0 flex-1">
                   <span className="text-foreground">{step.label}</span>
@@ -117,7 +126,7 @@ export function OptionCard({
             <ul className="mt-2 space-y-1">
               {option.notes.map((note, i) => (
                 <li key={i} className="text-muted-foreground flex items-start gap-1.5 text-xs">
-                  {note.toLowerCase().includes("surge") || note.toLowerCase().includes("negotiate") ? (
+                  {note.toLowerCase().includes("surge") || note.toLowerCase().includes("negotiat") ? (
                     <AlertTriangle className="mt-0.5 size-3 shrink-0 text-amber-500" />
                   ) : (
                     <Info className="mt-0.5 size-3 shrink-0" />

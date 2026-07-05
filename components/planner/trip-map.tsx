@@ -11,20 +11,19 @@ import {
   type MapRef,
 } from "@/components/ui/map";
 import { bboxOf } from "@/lib/geo";
-import { modeMeta } from "@/lib/modes";
-import type { CityConfig, Place, RouteOption } from "@/lib/types";
+import type { Place, RegionProfile, RouteOption } from "@/lib/types";
 
 /**
  * The trip map: numbered stop markers, the selected option's geometry per
- * leg (colored by mode, metro segments in line colors, walks dashed), and
- * metro stations as subtle dots for orientation.
+ * leg (colored by mode, transit segments in line colors, walks dashed),
+ * and — where a curated network exists — its stations as subtle dots.
  */
 export function TripMap({
-  city,
+  region,
   stops,
   selectedOptions,
 }: {
-  city: CityConfig;
+  region: RegionProfile;
   stops: Place[];
   selectedOptions: RouteOption[];
 }) {
@@ -61,22 +60,22 @@ export function TripMap({
     );
   }, [allPoints, stopsKey, selectedOptions.length]);
 
-  const metroStations = useMemo(
-    () => (city.metro ? Object.values(city.metro.stations) : []),
-    [city.metro],
+  const curatedStations = useMemo(
+    () => (region.metro ? Object.values(region.metro.stations) : []),
+    [region.metro],
   );
 
   return (
-    <Map ref={mapRef} center={city.center} zoom={11.5} attributionControl={false}>
+    <Map ref={mapRef} center={[20, 12]} zoom={1.6} attributionControl={{ compact: true }}>
       <MapControls position="bottom-right" showZoom showLocate />
 
-      {/* Metro stations as subtle orientation dots (only when a metro exists) */}
-      {metroStations.map((st) => (
+      {/* Curated network stations as subtle orientation dots */}
+      {curatedStations.map((st) => (
         <MapMarker key={st.id} longitude={st.lngLat[0]} latitude={st.lngLat[1]}>
           <MarkerContent>
             <div className="size-1.5 rounded-full bg-sky-500/50 ring-1 ring-white/60 dark:ring-black/40" />
           </MarkerContent>
-          <MarkerTooltip>{st.name} Metro</MarkerTooltip>
+          <MarkerTooltip>{st.name}</MarkerTooltip>
         </MapMarker>
       ))}
 
@@ -89,7 +88,7 @@ export function TripMap({
               key={`${opt.id}-${i}`}
               id={`${opt.id}-${i}`}
               coordinates={step.geometry}
-              color={step.color ?? modeMeta(opt.mode).color}
+              color={step.color ?? opt.color}
               width={step.kind === "walk" ? 3 : 4.5}
               opacity={step.kind === "walk" ? 0.7 : 0.85}
               dashArray={step.kind === "walk" ? [1.5, 2] : undefined}
@@ -98,7 +97,7 @@ export function TripMap({
           )),
       )}
 
-      {/* Stop markers, numbered A, B, C… */}
+      {/* Stop markers, lettered A, B, C… */}
       {stops.map((stop, i) => (
         <MapMarker
           key={`${stop.id}-${i}`}

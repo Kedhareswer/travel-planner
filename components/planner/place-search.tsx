@@ -5,19 +5,21 @@ import { Loader2, MapPin, Search } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { searchLocal, searchPlaces } from "@/lib/places";
-import type { CityConfig, Place } from "@/lib/types";
+import type { LngLat, Place } from "@/lib/types";
 
 /**
- * Debounced place autocomplete: instant curated results, geocoder for the
- * long tail. Plain listbox (no portal) so it works inside any layout.
+ * Global place autocomplete: instant curated results, the whole world via
+ * the geocoder, biased toward the trip so far. Plain listbox (no portal)
+ * so it works inside any layout.
  */
 export function PlaceSearch({
-  city,
+  bias,
   onSelect,
-  placeholder = "Search a place or locality…",
+  placeholder = "Search any place, anywhere…",
   autoFocus,
 }: {
-  city: CityConfig;
+  /** bias results toward here (e.g. the previous stop) */
+  bias?: LngLat;
   onSelect: (place: Place) => void;
   placeholder?: string;
   autoFocus?: boolean;
@@ -32,7 +34,7 @@ export function PlaceSearch({
   const rootRef = useRef<HTMLDivElement>(null);
   const listId = useId();
 
-  const localResults = useMemo(() => searchLocal(city, query), [city, query]);
+  const localResults = useMemo(() => searchLocal(query), [query]);
   const results = merged?.q === query ? merged.places : localResults;
   const busy = Boolean(query.trim().length >= 3 && merged?.q !== query);
   // Clamp against async result-list shrinkage.
@@ -43,12 +45,12 @@ export function PlaceSearch({
     if (query.trim().length < 3) return;
     const run = ++seq.current;
     const t = setTimeout(async () => {
-      const places = await searchPlaces(city, query);
+      const places = await searchPlaces(query, bias);
       if (run !== seq.current) return;
       setMerged({ q: query, places });
     }, 250);
     return () => clearTimeout(t);
-  }, [city, query]);
+  }, [bias, query]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {

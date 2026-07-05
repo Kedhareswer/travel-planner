@@ -9,22 +9,32 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { MODE_LIST } from "@/lib/modes";
-import type { ModeId, TripPreferences } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { formatMoney } from "@/lib/region";
+import { CYCLE_MODE_ID, TRANSIT_MODE_ID } from "@/lib/planner";
+import type { RegionProfile, TripPreferences } from "@/lib/types";
 
 /**
- * Trip preferences: peak traffic, how much an hour is worth to the user
- * (drives the "Best" ranking), max walking distance, excluded modes.
+ * Trip preferences: peak traffic, what an hour is worth to the user in the
+ * local currency (drives the "Best" ranking), max walking distance, and
+ * which of the region's modes to compare.
  */
 export function PrefsPanel({
+  region,
   prefs,
   onChange,
 }: {
+  region: RegionProfile;
   prefs: TripPreferences;
   onChange: (prefs: TripPreferences) => void;
 }) {
+  const toggles: { id: string; label: string }[] = [
+    { id: TRANSIT_MODE_ID, label: "Public transit" },
+    ...(region.cycling ? [{ id: CYCLE_MODE_ID, label: "Bicycle" }] : []),
+    ...region.roadModes.map((m) => ({ id: m.id, label: m.label })),
+  ];
+
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between gap-2">
@@ -44,15 +54,15 @@ export function PrefsPanel({
           value={String(prefs.valueOfTimePerHour)}
           onValueChange={(v) => onChange({ ...prefs, valueOfTimePerHour: Number(v) })}
         >
-          <SelectTrigger size="sm" className="w-32">
+          <SelectTrigger size="sm" className="w-36">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="50">₹50 / hour</SelectItem>
-            <SelectItem value="100">₹100 / hour</SelectItem>
-            <SelectItem value="150">₹150 / hour</SelectItem>
-            <SelectItem value="300">₹300 / hour</SelectItem>
-            <SelectItem value="600">₹600 / hour</SelectItem>
+            {region.valueOfTimePresets.map((v) => (
+              <SelectItem key={v} value={String(v)}>
+                {formatMoney(v, region)} / hour
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
       </div>
@@ -63,7 +73,7 @@ export function PrefsPanel({
           value={String(prefs.maxWalkKm)}
           onValueChange={(v) => onChange({ ...prefs, maxWalkKm: Number(v) })}
         >
-          <SelectTrigger size="sm" className="w-32">
+          <SelectTrigger size="sm" className="w-36">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -78,27 +88,30 @@ export function PrefsPanel({
       <div>
         <Label className="mb-1.5 block text-sm font-normal">Modes to compare</Label>
         <div className="flex flex-wrap gap-1">
-          {MODE_LIST.filter((m) => m.id !== "walk").map((mode) => {
-            const excluded = prefs.excludedModes.includes(mode.id);
+          {toggles.map((t) => {
+            const excluded = prefs.excludedModes.includes(t.id);
             return (
               <button
-                key={mode.id}
+                key={t.id}
                 type="button"
                 onClick={() =>
                   onChange({
                     ...prefs,
                     excludedModes: excluded
-                      ? prefs.excludedModes.filter((m: ModeId) => m !== mode.id)
-                      : [...prefs.excludedModes, mode.id],
+                      ? prefs.excludedModes.filter((m) => m !== t.id)
+                      : [...prefs.excludedModes, t.id],
                   })
                 }
                 aria-pressed={!excluded}
               >
                 <Badge
                   variant={excluded ? "outline" : "secondary"}
-                  className={cn("cursor-pointer", excluded && "text-muted-foreground line-through opacity-60")}
+                  className={cn(
+                    "cursor-pointer",
+                    excluded && "text-muted-foreground line-through opacity-60",
+                  )}
                 >
-                  {mode.label}
+                  {t.label}
                 </Badge>
               </button>
             );

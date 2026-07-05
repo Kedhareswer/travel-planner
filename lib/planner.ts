@@ -1,112 +1,132 @@
-import { bookingFor } from "./deeplinks";
 import { estimateFare, slabFare } from "./fares";
 import { formatKm, haversineKm, straightLine } from "./geo";
+import { googleMapsLink, providerHandoff } from "./providers";
 import { metroRide, nearestStations } from "./transit/metro";
-import { roadRoute } from "./routing/osrm";
+import { osmRailNetwork } from "./transit/overpass";
+import { planTransit } from "./transit/transitous";
+import { bikeRoute, roadRoute } from "./routing/osrm";
 import type {
-  CityConfig,
   LegPlan,
-  ModeId,
+  MetroNetwork,
+  ModeKind,
   Place,
   PriceBand,
+  RegionProfile,
   RouteOption,
   RouteStep,
   TripPreferences,
 } from "./types";
 
 /**
- * The planner: for one leg (from -> to) produce every viable RouteOption
- * with time bands, price bands and drawable steps, then mark the Pareto set.
+ * The planner: for one leg (from -> to), in whatever region of the world
+ * the stops are in, produce every viable RouteOption with time bands,
+ * price bands in local currency, and drawable steps.
  *
- * Time bands come from [off-peak, peak] speeds plus pickup/platform waits.
- * Price bands come from fare cards plus a demand-pricing uncertainty band.
+ * Transit resolution is layered by data quality:
+ *   curated pack network -> Transitous scheduled routing -> OSM-derived
+ *   rail graph -> heuristic corridor bus. Road modes come from the
+ *   region's transport catalog; walking and cycling are universal.
  */
 
-export const DEFAULT_PREFS: TripPreferences = {
-  valueOfTimePerHour: 150,
-  // Thermal-comfort research puts the comfortable walk in Indian heat at
-  // ~500-800 m; 1.2 km default errs slightly generous, user-adjustable.
-  maxWalkKm: 1.2,
-  peakHours: false,
-  excludedModes: [],
-};
-
-/** Max walk to/from a metro station before we switch the access leg to an auto. */
-const STATION_WALK_MAX_KM = 0.8;
-/** Pickup wait bands per road mode, minutes [low, high]. */
-const PICKUP_WAIT: Record<string, [number, number]> = {
-  auto: [1, 4],
-  "uber-go": [3, 8],
-  "uber-auto": [2, 6],
-  "uber-moto": [2, 5],
-  "rapido-bike": [2, 5],
-  "rapido-auto": [2, 6],
-  "rapido-cab": [3, 8],
-};
-
-interface SpeedBand {
-  low: number; // km/h off-peak
-  high: number; // km/h peak (slower)
+export function defaultPrefs(region: RegionProfile): TripPreferences {
+  return {
+    valueOfTimePerHour: region.valueOfTimeDefault,
+    // Thermal-comfort research puts the comfortable urban walk at
+    // ~500-800 m in hot climates; 1.2 km errs slightly generous.
+    maxWalkKm: 1.2,
+    peakHours: false,
+    excludedModes: [],
+  };
 }
 
-function speedFor(city: CityConfig, mode: ModeId): SpeedBand {
-  const s = city.speeds;
-  switch (mode) {
+/** Reserved non-catalog mode ids usable in prefs.excludedModes. */
+export const TRANSIT_MODE_ID = "transit";
+export const CYCLE_MODE_ID = "cycle";
+export const WALK_MODE_ID = "walk";
+
+/** Max distance we offer an own-bicycle option for. */
+const CYCLE_MAX_KM = 10;
+/** Max walk to/from a station before the access leg becomes an auto/cab hop. */
+const STATION_WALK_MAX_KM = 0.8;
+
+interface SpeedBand {
+  fastKmh: number; // off-peak
+  slowKmh: number; // peak
+}
+
+function speedForKind(region: RegionProfile, kind: ModeKind): SpeedBand {
+  const s = region.speeds;
+  switch (kind) {
     case "walk":
-      return { low: s.walk, high: s.walk };
-    case "uber-moto":
-    case "rapido-bike":
-      return { low: s.bike[1], high: s.bike[0] };
+      return { fastKmh: s.walk, slowKmh: s.walk };
+    case "cycle":
+    case "scooter":
+      return { fastKmh: s.cycle, slowKmh: s.cycle * 0.9 };
+    case "bike":
+      return { fastKmh: s.bike[1], slowKmh: s.bike[0] };
     case "auto":
-    case "uber-auto":
-    case "rapido-auto":
-      return { low: s.auto[1], high: s.auto[0] };
-    case "uber-go":
-    case "rapido-cab":
-      return { low: s.car[1], high: s.car[0] };
+      return { fastKmh: s.auto[1], slowKmh: s.auto[0] };
     case "bus":
-      return { low: s.bus[1], high: s.bus[0] };
-    case "metro":
-      return { low: city.metro?.commercialSpeedKmh ?? 32, high: city.metro?.commercialSpeedKmh ?? 32 };
+      return { fastKmh: s.bus[1], slowKmh: s.bus[0] };
+    default:
+      return { fastKmh: s.car[1], slowKmh: s.car[0] };
   }
 }
 
-function rideMinutes(km: number, speed: SpeedBand, peak: boolean): { low: number; high: number } {
-  // Peak toggle narrows the band toward the slow end rather than pretending certainty.
-  const fast = (km / speed.low) * 60;
-  const slow = (km / speed.high) * 60;
+function rideMinutes(
+  km: number,
+  speed: SpeedBand,
+  peak: boolean,
+): { low: number; high: number } {
+  const fast = (km / speed.fastKmh) * 60;
+  const slow = (km / speed.slowKmh) * 60;
   return peak ? { low: (fast + slow) / 2, high: slow * 1.15 } : { low: fast, high: slow };
 }
 
-// One option per mode per leg, so this id is unique AND stable across
-// replans — React keys and the user's selection survive recomputation.
+// One option per mode per leg — ids stay stable across replans.
 const oid = (mode: string, leg: number) => `${mode}-${leg}`;
+
+const price = (
+  low: number,
+  high: number,
+  region: RegionProfile,
+  surgeProne = false,
+): PriceBand => ({
+  low: Math.round(low * 100) / 100,
+  high: Math.round(high * 100) / 100,
+  currency: region.currency,
+  surgeProne,
+});
 
 /** Build every option for one leg. Road geometry is fetched once and shared. */
 export async function planLeg(
-  city: CityConfig,
+  region: RegionProfile,
   from: Place,
   to: Place,
   legIndex: number,
   prefs: TripPreferences,
 ): Promise<LegPlan> {
-  const road = await roadRoute(from.lngLat, to.lngLat, city.speeds.detourIndex);
+  const road = await roadRoute(from.lngLat, to.lngLat, region.speeds.detourIndex);
   const crowKm = haversineKm(from.lngLat, to.lngLat);
   const roadKm = road.distanceKm;
-  // Walking cuts corners cars can't; cap the walking distance estimate.
+  // Walking/cycling cut corners cars can't; cap their distance estimate.
   const walkKm = Math.min(roadKm, crowKm * 1.3);
   const options: RouteOption[] = [];
+  const excluded = new Set(prefs.excludedModes);
 
   // ---- Walk ----
-  if (walkKm <= prefs.maxWalkKm) {
-    const mins = (walkKm / city.speeds.walk) * 60;
+  if (walkKm <= prefs.maxWalkKm && !excluded.has(WALK_MODE_ID)) {
+    const mins = (walkKm / region.speeds.walk) * 60;
     options.push({
-      id: oid("walk", legIndex),
-      mode: "walk",
+      id: oid(WALK_MODE_ID, legIndex),
+      mode: WALK_MODE_ID,
+      label: "Walk",
+      kind: "walk",
+      color: "#64748b",
       legIndex,
       summary: `${formatKm(walkKm)} on foot`,
       durationMin: { low: mins, high: mins * 1.15 },
-      price: { low: 0, high: 0, surgeProne: false },
+      price: price(0, 0, region),
       distanceKm: walkKm,
       walkKm,
       transfers: 0,
@@ -119,32 +139,79 @@ export async function planLeg(
           geometry: road.fromOsrm ? road.geometry : straightLine(from.lngLat, to.lngLat),
         },
       ],
-      bookingUrl: bookingFor("walk", from, to)?.url,
-      bookingLabel: bookingFor("walk", from, to)?.label,
-      notes: walkKm > 1.2 ? ["Long walk — consider heat, footpath quality and time of day"] : [],
-      roadGeometry: road.fromOsrm,
+      bookingUrl: googleMapsLink(from, to, "walking"),
+      bookingLabel: "Walking directions",
+      notes:
+        walkKm > 1.2
+          ? ["Long walk — consider heat, footpath quality and time of day"]
+          : [],
+      dataTier: road.fromOsrm ? "live" : "estimated",
     });
   }
 
-  // ---- Road modes from fare cards ----
-  for (const card of city.fareCards) {
-    if (prefs.excludedModes.includes(card.mode)) continue;
-    const speed = speedFor(city, card.mode);
+  // ---- Own bicycle (bike-profile routing: paths & cycleways) ----
+  if (region.cycling && crowKm <= CYCLE_MAX_KM && !excluded.has(CYCLE_MODE_ID)) {
+    const bike = await bikeRoute(from.lngLat, to.lngLat, region.speeds.detourIndex);
+    const cycleKm = bike.fromOsrm ? bike.distanceKm : Math.min(roadKm, crowKm * 1.35);
+    const ride = bike.fromOsrm
+      ? { low: bike.durationMin, high: bike.durationMin * 1.2 }
+      : rideMinutes(cycleKm, speedForKind(region, "cycle"), prefs.peakHours);
+    options.push({
+      id: oid(CYCLE_MODE_ID, legIndex),
+      mode: CYCLE_MODE_ID,
+      label: "Bicycle",
+      kind: "cycle",
+      color: "#0d9488",
+      legIndex,
+      summary: `${formatKm(cycleKm)} by bike`,
+      durationMin: ride,
+      price: price(0, 0, region),
+      distanceKm: cycleKm,
+      walkKm: 0,
+      transfers: 0,
+      steps: [
+        {
+          kind: "cycle",
+          label: `Cycle to ${to.name}`,
+          detail: formatKm(cycleKm),
+          distanceKm: cycleKm,
+          durationMin: (ride.low + ride.high) / 2,
+          geometry: bike.fromOsrm ? bike.geometry : road.geometry,
+        },
+      ],
+      bookingUrl: googleMapsLink(from, to, "bicycling"),
+      bookingLabel: "Cycling directions",
+      notes: ["Assumes you have a bicycle available"],
+      dataTier: bike.fromOsrm ? "live" : "estimated",
+    });
+  }
+
+  // ---- Road modes from the region's transport catalog ----
+  for (const tm of region.roadModes) {
+    if (excluded.has(tm.id)) continue;
+    if (tm.maxKm && roadKm > tm.maxKm) continue;
+    const speed = speedForKind(region, tm.kind);
     const ride = rideMinutes(roadKm, speed, prefs.peakHours);
-    const wait = PICKUP_WAIT[card.mode] ?? [2, 6];
-    const price = estimateFare(card, roadKm, (ride.low + ride.high) / 2);
-    const booking = bookingFor(card.mode, from, to);
-    const notes = [...(card.notes ?? [])];
-    if (price.surgeProne && prefs.peakHours) notes.push("Peak hours — surge pricing likely");
+    const wait = tm.pickupWaitMin ?? [2, 6];
+    const fareBand = estimateFare(tm.fare, roadKm, (ride.low + ride.high) / 2);
+    const booking = providerHandoff(tm.provider, from, to) ?? {
+      url: googleMapsLink(from, to, "driving"),
+      label: "Directions",
+    };
+    const notes = [...(tm.fare.notes ?? [])];
+    if (fareBand.surgeProne && prefs.peakHours) notes.push("Peak hours — surge pricing likely");
     if (!road.fromOsrm) notes.push("Distance estimated (road routing unavailable)");
 
     options.push({
-      id: oid(card.mode, legIndex),
-      mode: card.mode,
+      id: oid(tm.id, legIndex),
+      mode: tm.id,
+      label: tm.label,
+      kind: tm.kind,
+      color: tm.color,
       legIndex,
       summary: `${formatKm(roadKm)} by road`,
       durationMin: { low: ride.low + wait[0], high: ride.high + wait[1] },
-      price,
+      price: { ...fareBand, currency: region.currency },
       distanceKm: roadKm,
       walkKm: 0,
       transfers: 0,
@@ -157,7 +224,7 @@ export async function planLeg(
           geometry: [],
         },
         {
-          kind: modeKindOf(card.mode),
+          kind: tm.kind,
           label: `Ride to ${to.name}`,
           detail: formatKm(roadKm),
           distanceKm: roadKm,
@@ -165,68 +232,17 @@ export async function planLeg(
           geometry: road.geometry,
         },
       ],
-      bookingUrl: booking?.url,
-      bookingLabel: booking?.label,
+      bookingUrl: booking.url,
+      bookingLabel: booking.label,
       notes,
-      roadGeometry: road.fromOsrm,
+      dataTier: region.tier === "curated" ? "curated" : "estimated",
     });
   }
 
-  // ---- Metro (with access/egress legs) ----
-  if (city.metro && !prefs.excludedModes.includes("metro")) {
-    const metroOpt = buildMetroOption(city, from, to, legIndex, prefs);
-    if (metroOpt) options.push(metroOpt);
-  }
-
-  // ---- Bus (indicative) ----
-  if (!prefs.excludedModes.includes("bus") && roadKm >= 1.5) {
-    const busKm = roadKm * 1.1; // buses detour via stops
-    const busWalkKm = 0.4; // typical walk to/from stops on the corridor
-    const busWalkMin = (busWalkKm / city.speeds.walk) * 60;
-    const speed = speedFor(city, "bus");
-    const ride = rideMinutes(busKm, speed, prefs.peakHours);
-    const wait = city.speeds.busAvgWaitMin;
-    const fare = slabFare(city.busFareSlabsKm, busKm);
-    options.push({
-      id: oid("bus", legIndex),
-      mode: "bus",
-      legIndex,
-      summary: `~${formatKm(busKm)} by bus`,
-      durationMin: {
-        low: ride.low + wait * 0.6 + busWalkMin,
-        high: ride.high + wait * 1.6 + busWalkMin,
-      },
-      price: { low: fare, high: Math.round(fare * 1.6), surgeProne: false },
-      distanceKm: busKm,
-      walkKm: busWalkKm,
-      transfers: 0,
-      steps: [
-        {
-          kind: "walk",
-          label: "Walk to/from bus stops",
-          detail: formatKm(busWalkKm),
-          distanceKm: busWalkKm,
-          durationMin: busWalkMin,
-          geometry: [],
-        },
-        { kind: "wait", label: "Wait for bus", distanceKm: 0, durationMin: wait, geometry: [] },
-        {
-          kind: "bus",
-          label: `Bus toward ${to.name}`,
-          detail: "Route availability varies",
-          distanceKm: busKm,
-          durationMin: (ride.low + ride.high) / 2,
-          geometry: road.geometry,
-        },
-      ],
-      bookingUrl: bookingFor("bus", from, to)?.url,
-      bookingLabel: bookingFor("bus", from, to)?.label,
-      notes: [
-        "Indicative — assumes a direct bus exists on this corridor; check live routes",
-        "Women residents of Telangana ride free on Ordinary/Express (Mahalakshmi scheme)",
-      ],
-      roadGeometry: road.fromOsrm,
-    });
+  // ---- Public transit (layered sources) ----
+  if (!excluded.has(TRANSIT_MODE_ID) && crowKm >= 1) {
+    const transit = await transitOptions(region, from, to, legIndex, prefs, roadKm, road.geometry, road.fromOsrm);
+    options.push(...transit);
   }
 
   const scored = options.sort(
@@ -242,50 +258,131 @@ export async function planLeg(
   };
 }
 
-function modeKindOf(mode: ModeId): RouteStep["kind"] {
-  if (mode === "uber-go" || mode === "rapido-cab") return "cab";
-  if (mode === "uber-moto" || mode === "rapido-bike") return "bike";
-  if (mode === "bus") return "bus";
-  if (mode === "metro") return "metro";
-  if (mode === "walk") return "walk";
-  return "auto";
-}
+/* ------------------------------ Transit chain ---------------------------- */
 
-function buildMetroOption(
-  city: CityConfig,
+async function transitOptions(
+  region: RegionProfile,
   from: Place,
   to: Place,
   legIndex: number,
   prefs: TripPreferences,
+  roadKm: number,
+  roadGeometry: [number, number][],
+  roadFromOsrm: boolean,
+): Promise<RouteOption[]> {
+  const out: RouteOption[] = [];
+
+  // Tier 1 — curated pack network (best data, includes real fares)
+  if (region.metro) {
+    const opt = buildRailOption(region, region.metro, from, to, legIndex, prefs, "curated");
+    if (opt) out.push(opt);
+  } else {
+    // Tier 2 — Transitous scheduled routing (real timetables worldwide,
+    // where coverage exists)
+    const itineraries = await planTransit(from.lngLat, to.lngLat);
+    if (itineraries?.length) {
+      out.push(transitousOption(region, itineraries[0], from, to, legIndex));
+    } else {
+      // Tier 3 — OSM-derived rail graph
+      const net = await osmRailNetwork(from.lngLat, to.lngLat);
+      if (net) {
+        const opt = buildRailOption(region, net, from, to, legIndex, prefs, "estimated");
+        if (opt) out.push(opt);
+      }
+    }
+  }
+
+  // Corridor bus heuristic — only when no scheduled source produced the
+  // bus picture (Transitous itineraries already include buses).
+  const haveScheduled = out.some((o) => o.dataTier === "live");
+  if (!haveScheduled && roadKm >= 1.5) {
+    out.push(busHeuristicOption(region, from, to, legIndex, prefs, roadKm, roadGeometry, roadFromOsrm));
+  }
+
+  return out;
+}
+
+/** Map the best Transitous itinerary to a RouteOption. */
+function transitousOption(
+  region: RegionProfile,
+  it: import("./transit/transitous").TransitousItinerary,
+  from: Place,
+  to: Place,
+  legIndex: number,
+): RouteOption {
+  const steps: RouteStep[] = it.legs.map((leg) => ({
+    kind: leg.kind,
+    label:
+      leg.kind === "walk"
+        ? `Walk to ${leg.toName}`
+        : `${leg.routeName ?? leg.kind} · ${leg.fromName} → ${leg.toName}`,
+    detail: leg.headsign ? `toward ${leg.headsign}` : undefined,
+    distanceKm: leg.distanceKm,
+    durationMin: leg.durationMin,
+    geometry: leg.geometry,
+    color: leg.color,
+  }));
+
+  // Fares aren't in most GTFS feeds — use the region band per boarding,
+  // assuming transfers are often free/capped past the second vehicle.
+  const [fmLow, fmHigh] = region.transitFare.metro;
+  const [fbLow, fbHigh] = region.transitFare.bus;
+  const railBoardings = it.legs.filter((l) => ["metro", "train", "tram", "ferry"].includes(l.kind)).length;
+  const busBoardings = it.boardings - railBoardings;
+  const low = Math.min(railBoardings ? fmLow : Infinity, busBoardings ? fbLow : Infinity);
+  const high =
+    (railBoardings ? fmHigh : 0) + (busBoardings ? fbHigh : 0) * Math.min(busBoardings, 1);
+
+  const kinds = it.legs.filter((l) => l.kind !== "walk").map((l) => l.kind);
+  const primaryKind = (kinds.find((k) => k === "metro" || k === "train") ?? kinds[0] ?? "bus") as ModeKind;
+  const lineNames = it.legs.filter((l) => l.routeName).map((l) => l.routeName).slice(0, 3);
+
+  return {
+    id: oid(TRANSIT_MODE_ID, legIndex),
+    mode: TRANSIT_MODE_ID,
+    label: "Public transit",
+    kind: primaryKind,
+    color: "#0ea5e9",
+    legIndex,
+    summary: lineNames.length ? lineNames.join(" → ") : "Scheduled transit",
+    durationMin: { low: it.durationMin, high: it.durationMin * 1.15 },
+    price: price(low === Infinity ? fbLow : low, Math.max(high, low === Infinity ? fbHigh : low), region),
+    distanceKm: it.distanceKm,
+    walkKm: it.walkKm,
+    transfers: it.transfers,
+    steps,
+    bookingUrl: googleMapsLink(from, to, "transit"),
+    bookingLabel: "Transit directions",
+    notes: ["Live timetable routing (Transitous) — fares are a local estimate band"],
+    dataTier: "live",
+  };
+}
+
+/** Shared rail-graph option builder (curated pack or OSM-derived). */
+function buildRailOption(
+  region: RegionProfile,
+  net: MetroNetwork,
+  from: Place,
+  to: Place,
+  legIndex: number,
+  prefs: TripPreferences,
+  dataTier: "curated" | "estimated",
 ): RouteOption | null {
-  const net = city.metro!;
   const entries = nearestStations(net, from.lngLat, 2);
   const exits = nearestStations(net, to.lngLat, 2);
   if (!entries.length || !exits.length) return null;
-  // The user's walk tolerance also bounds each station access walk.
   const stationWalkMax = Math.min(STATION_WALK_MAX_KM, prefs.maxWalkKm);
 
-  // Try the nearest pair combinations, keep the best total time.
-  let best: {
-    ride: NonNullable<ReturnType<typeof metroRide>>;
-    entryKm: number;
-    exitKm: number;
-  } | null = null;
-
-  // Score = ride time + access/egress at walking pace + a transfer-aversion
-  // penalty (beyond the interchange time itself) — prefers the direct line
-  // even when a transfer-route station is slightly closer.
-  const walkMinPerKm = 60 / city.speeds.walk;
-  const score = (ride: NonNullable<ReturnType<typeof metroRide>>, eKm: number, xKm: number) =>
-    ride.durationMin + (eKm + xKm) * walkMinPerKm + ride.transfers * 6;
-
+  // Score = ride time + access/egress at walking pace + transfer aversion.
+  const walkMinPerKm = 60 / region.speeds.walk;
+  let best: { ride: NonNullable<ReturnType<typeof metroRide>>; entryKm: number; exitKm: number } | null = null;
   let bestScore = Infinity;
   for (const e of entries) {
     for (const x of exits) {
       if (e.station.id === x.station.id) continue;
       const ride = metroRide(net, e.station.id, x.station.id);
       if (!ride) continue;
-      const s = score(ride, e.km, x.km);
+      const s = ride.durationMin + (e.km + x.km) * walkMinPerKm + ride.transfers * 6;
       if (s < bestScore) {
         bestScore = s;
         best = { ride, entryKm: e.km, exitKm: x.km };
@@ -295,26 +392,25 @@ function buildMetroOption(
   if (!best) return null;
   const { ride, entryKm, exitKm } = best;
 
-  // Metro only makes sense if the ride is a meaningful part of the journey:
-  // not for sub-km hops (walk/auto dominate and a 1-stop ride trivially
-  // passes a ratio test), and not when most of the trip is access/egress.
   const crowKm = haversineKm(from.lngLat, to.lngLat);
   if (crowKm < 1 || ride.distanceKm < 1 || ride.distanceKm < crowKm * 0.45) return null;
 
+  // Fare: real slabs when the network has them, else the region band.
+  const fareLow = ride.fare ?? region.transitFare.metro[0];
+  const fareHigh = ride.fare ?? region.transitFare.metro[1];
+
   const steps: RouteStep[] = [];
   const notes: string[] = [];
-  let priceLow = ride.fare;
-  let priceHigh = ride.fare;
+  let priceLow = fareLow;
+  let priceHigh = fareHigh;
   let walkTotal = 0;
 
-  // Access leg
-  const access = accessLeg(city, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} Metro`, stationWalkMax);
+  const access = accessLeg(region, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} station`, stationWalkMax);
   steps.push(access.step);
   priceLow += access.price.low;
   priceHigh += access.price.high;
   walkTotal += access.walkKm;
 
-  // Platform wait
   steps.push({
     kind: "wait",
     label: "Ticket + platform wait",
@@ -323,7 +419,6 @@ function buildMetroOption(
     geometry: [],
   });
 
-  // Ride segments (colored per line), with interchanges as explicit steps
   ride.segments.forEach((seg, i) => {
     if (i > 0) {
       steps.push({
@@ -346,10 +441,8 @@ function buildMetroOption(
   });
   if (ride.transfers > 0) notes.push(`${ride.transfers} interchange${ride.transfers > 1 ? "s" : ""}`);
 
-  // Egress leg — the walk budget is per whole leg, so spend what the
-  // access walk left over (an auto hop takes over past the remainder).
   const egressWalkMax = Math.max(0, Math.min(stationWalkMax, prefs.maxWalkKm - access.walkKm));
-  const egress = accessLeg(city, ride.exit.lngLat, to.lngLat, exitKm, to.name, egressWalkMax);
+  const egress = accessLeg(region, ride.exit.lngLat, to.lngLat, exitKm, to.name, egressWalkMax);
   steps.push(egress.step);
   priceLow += egress.price.low;
   priceHigh += egress.price.high;
@@ -359,35 +452,108 @@ function buildMetroOption(
   const low = rideMin + access.durationMin.low + egress.durationMin.low;
   const high = rideMin * 1.1 + access.durationMin.high + egress.durationMin.high;
 
-  const booking = bookingFor("metro", from, to);
-  notes.push(`Metro fare ₹${ride.fare} · trains ${net.firstTrain}–${net.lastTrain}`);
+  if (dataTier === "curated") {
+    if (ride.fare !== null) notes.push(`Metro fare ${region.currency === "INR" ? "₹" : ""}${ride.fare}`);
+    if (net.firstTrain && net.lastTrain) notes.push(`Trains ${net.firstTrain}–${net.lastTrain}`);
+  } else {
+    notes.push("Network from OpenStreetMap; fares are a local estimate band");
+  }
 
   return {
     id: oid("metro", legIndex),
     mode: "metro",
+    label: dataTier === "curated" ? "Metro" : "Metro / rail",
+    kind: "metro",
+    color: "#0ea5e9",
     legIndex,
     summary: `${ride.entry.name} → ${ride.exit.name}`,
     durationMin: { low, high },
     price: {
       low: Math.round(priceLow),
       high: Math.round(priceHigh),
-      // The metro fare is fixed, but an auto access/egress leg is not.
+      currency: region.currency,
       surgeProne: access.price.surgeProne || egress.price.surgeProne,
     },
     distanceKm: ride.distanceKm + entryKm + exitKm,
     walkKm: walkTotal,
     transfers: ride.transfers,
     steps,
-    bookingUrl: booking?.url,
-    bookingLabel: booking?.label,
+    bookingUrl: googleMapsLink(from, to, "transit"),
+    bookingLabel: "Transit directions",
     notes,
-    roadGeometry: true,
+    dataTier,
   };
 }
 
-/** Walk if close, otherwise a short auto hop — the first/last-mile reality. */
+function busHeuristicOption(
+  region: RegionProfile,
+  from: Place,
+  to: Place,
+  legIndex: number,
+  prefs: TripPreferences,
+  roadKm: number,
+  roadGeometry: [number, number][],
+  roadFromOsrm: boolean,
+): RouteOption {
+  const busKm = roadKm * 1.1; // buses detour via stops
+  const busWalkKm = 0.4;
+  const busWalkMin = (busWalkKm / region.speeds.walk) * 60;
+  const ride = rideMinutes(busKm, speedForKind(region, "bus"), prefs.peakHours);
+  const wait = region.speeds.busAvgWaitMin;
+  const [bandLow, bandHigh] = region.transitFare.bus;
+  const fareLow = region.busFareSlabsKm ? slabFare(region.busFareSlabsKm, busKm) : bandLow;
+  const fareHigh = region.busFareSlabsKm ? Math.round(fareLow * 1.6) : bandHigh;
+
+  const notes = ["Indicative — assumes a direct bus exists on this corridor; check live routes"];
+  if (region.id === "city:hyderabad") {
+    notes.push("Women residents of Telangana ride free on Ordinary/Express (Mahalakshmi scheme)");
+  }
+
+  return {
+    id: oid("bus", legIndex),
+    mode: "bus",
+    label: "City bus",
+    kind: "bus",
+    color: "#22c55e",
+    legIndex,
+    summary: `~${formatKm(busKm)} by bus`,
+    durationMin: {
+      low: ride.low + wait * 0.6 + busWalkMin,
+      high: ride.high + wait * 1.6 + busWalkMin,
+    },
+    price: price(fareLow, fareHigh, region),
+    distanceKm: busKm,
+    walkKm: busWalkKm,
+    transfers: 0,
+    steps: [
+      {
+        kind: "walk",
+        label: "Walk to/from bus stops",
+        detail: formatKm(busWalkKm),
+        distanceKm: busWalkKm,
+        durationMin: busWalkMin,
+        geometry: [],
+      },
+      { kind: "wait", label: "Wait for bus", distanceKm: 0, durationMin: wait, geometry: [] },
+      {
+        kind: "bus",
+        label: `Bus toward ${to.name}`,
+        detail: "Route availability varies",
+        distanceKm: busKm,
+        durationMin: (ride.low + ride.high) / 2,
+        geometry: roadGeometry,
+      },
+    ],
+    bookingUrl: googleMapsLink(from, to, "transit"),
+    bookingLabel: "Transit directions",
+    notes,
+    dataTier: roadFromOsrm ? "estimated" : "estimated",
+  };
+}
+
+/** Walk if close, otherwise a short paid hop — the first/last-mile reality. */
 function accessLeg(
-  city: CityConfig,
+  region: RegionProfile,
   from: [number, number],
   to: [number, number],
   crowKm: number,
@@ -401,7 +567,7 @@ function accessLeg(
 } {
   const walkKm = crowKm * 1.25;
   if (walkKm <= walkMaxKm) {
-    const mins = (walkKm / city.speeds.walk) * 60;
+    const mins = (walkKm / region.speeds.walk) * 60;
     return {
       step: {
         kind: "walk",
@@ -411,28 +577,33 @@ function accessLeg(
         durationMin: mins,
         geometry: straightLine(from, to),
       },
-      price: { low: 0, high: 0, surgeProne: false },
+      price: price(0, 0, region),
       durationMin: { low: mins, high: mins * 1.2 },
       walkKm,
     };
   }
-  // Short auto hop
-  const autoCard = city.fareCards.find((c) => c.mode === "rapido-auto") ?? city.fareCards.find((c) => c.mode === "auto");
-  const roadKm = crowKm * city.speeds.detourIndex;
-  const mins = (roadKm / ((city.speeds.auto[0] + city.speeds.auto[1]) / 2)) * 60 + 3;
-  const price = autoCard
-    ? estimateFare(autoCard, roadKm, mins)
-    : { low: 30, high: 60, surgeProne: true };
+  // Short paid hop with the cheapest quick road mode available here
+  const hop =
+    region.roadModes.find((m) => m.kind === "auto") ??
+    region.roadModes.find((m) => m.kind === "bike") ??
+    region.roadModes[0];
+  const roadKm = crowKm * region.speeds.detourIndex;
+  const kind = hop?.kind ?? "auto";
+  const speed = speedForKind(region, kind);
+  const mins = (roadKm / ((speed.fastKmh + speed.slowKmh) / 2)) * 60 + 3;
+  const fare = hop
+    ? estimateFare(hop.fare, roadKm, mins)
+    : { low: 2, high: 5, surgeProne: true };
   return {
     step: {
-      kind: "auto",
-      label: `Auto to ${destLabel}`,
+      kind,
+      label: `${hop?.label ?? "Ride"} to ${destLabel}`,
       detail: formatKm(roadKm),
       distanceKm: roadKm,
       durationMin: mins,
       geometry: straightLine(from, to),
     },
-    price,
+    price: { ...fare, currency: region.currency },
     durationMin: { low: mins * 0.8, high: mins * 1.3 },
     walkKm: 0,
   };
@@ -448,7 +619,7 @@ export function midPrice(o: RouteOption): number {
   return (o.price.low + o.price.high) / 2;
 }
 
-/** Rupee-equivalent cost of an option: money + time valued at the user's rate. */
+/** Local-currency-equivalent cost: money + time valued at the user's rate. */
 export function generalizedCost(o: RouteOption, prefs: TripPreferences): number {
   return midPrice(o) + (midTime(o) / 60) * prefs.valueOfTimePerHour;
 }

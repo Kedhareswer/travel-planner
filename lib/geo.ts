@@ -39,9 +39,11 @@ export function centerOf(points: LngLat[]): LngLat {
 }
 
 /**
- * Decode a Google-encoded polyline (precision 5, OSRM default) to LngLat[].
+ * Decode a Google-encoded polyline to LngLat[].
+ * OSRM uses precision 5; MOTIS/Valhalla-style geometries use 6 or 7.
  */
-export function decodePolyline(str: string): LngLat[] {
+export function decodePolyline(str: string, precision = 5): LngLat[] {
+  const factor = 10 ** precision;
   let index = 0,
     lat = 0,
     lng = 0;
@@ -60,7 +62,7 @@ export function decodePolyline(str: string): LngLat[] {
       if (which === 0) lat += delta;
       else lng += delta;
     }
-    coords.push([lng / 1e5, lat / 1e5]);
+    coords.push([lng / factor, lat / factor]);
   }
   return coords;
 }

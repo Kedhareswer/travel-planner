@@ -1,16 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { generalizedCost, planLeg } from "@/lib/planner";
+import { defaultPrefs, generalizedCost, planLeg } from "@/lib/planner";
 import { optimizeStopOrder } from "@/lib/optimize";
+import { resolveRegion } from "@/lib/region";
 import type {
-  CityConfig,
   LegPlan,
   Place,
+  RegionProfile,
   RouteOption,
   TripPreferences,
 } from "@/lib/types";
-import { DEFAULT_PREFS } from "@/lib/planner";
 
 interface PlanResult {
   key: string;
@@ -18,8 +18,9 @@ interface PlanResult {
 }
 
 /** Stable key for one planning input, so results/selections can be derived. */
-function planKey(stops: Place[], prefs: TripPreferences): string {
+function planKey(stops: Place[], prefs: TripPreferences, region: RegionProfile): string {
   return JSON.stringify([
+    region.id,
     stops.map((s) => [s.id, s.lngLat]),
     prefs.valueOfTimePerHour,
     prefs.maxWalkKm,
@@ -29,22 +30,34 @@ function planKey(stops: Place[], prefs: TripPreferences): string {
 }
 
 /**
- * Owns the whole planning state: stops, preferences, computed leg plans
- * and the user's per-leg mode selection. Plans are stored together with
- * the input key they were computed for, so "planning" and the visible
- * plans are pure derivations — no state clearing inside effects.
+ * Owns the whole planning state: stops, the region they resolve to,
+ * preferences, computed leg plans and the user's per-leg mode selection.
  */
-export function useTripPlanner(city: CityConfig) {
+export function useTripPlanner() {
   const [stops, setStops] = useState<Place[]>([]);
-  const [prefs, setPrefs] = useState<TripPreferences>(DEFAULT_PREFS);
+  const region = useMemo(() => resolveRegion(stops), [stops]);
+
+  const [prefs, setPrefsRaw] = useState<TripPreferences>(() => defaultPrefs(region));
   const [result, setResult] = useState<PlanResult | null>(null);
   const [selectedByLeg, setSelectedByLeg] = useState<Record<number, string>>({});
   const runRef = useRef(0);
 
-  const key = planKey(stops, prefs);
+  // Money means different numbers in different currencies — when the trip
+  // moves to a new region, the value-of-time pref resets to its default.
+  const regionIdRef = useRef(region.id);
+  useEffect(() => {
+    if (regionIdRef.current === region.id) return;
+    regionIdRef.current = region.id;
+    setPrefsRaw((p) => ({
+      ...p,
+      valueOfTimePerHour: region.valueOfTimeDefault,
+      excludedModes: [],
+    }));
+  }, [region]);
+
+  const key = planKey(stops, prefs, region);
   // Stale-while-revalidate: keep showing the previous plans while a replan
-  // is in flight (the header spinner signals staleness) instead of blanking
-  // the whole panel to skeletons on every stop/preference tweak.
+  // is in flight (the header spinner signals staleness).
   const plans = useMemo(
     () => (stops.length >= 2 ? (result?.plans ?? []) : []),
     [stops.length, result],
@@ -57,10 +70,10 @@ export function useTripPlanner(city: CityConfig) {
     let cancelled = false;
     (async () => {
       const legs = await Promise.all(
-        stops.slice(0, -1).map((from, i) => planLeg(city, from, stops[i + 1], i, prefs)),
+        stops.slice(0, -1).map((from, i) => planLeg(region, from, stops[i + 1], i, prefs)),
       );
       if (cancelled || run !== runRef.current) return;
-      setResult({ key: planKey(stops, prefs), plans: legs });
+      setResult({ key: planKey(stops, prefs, region), plans: legs });
       // Carry the user's mode choice across replans when possible.
       setSelectedByLeg((prev) => {
         const next: Record<number, string> = {};
@@ -80,7 +93,9 @@ export function useTripPlanner(city: CityConfig) {
     return () => {
       cancelled = true;
     };
-  }, [city, stops, prefs]);
+  }, [region, stops, prefs]);
+
+  const setPrefs = useCallback((p: TripPreferences) => setPrefsRaw(p), []);
 
   const addStop = useCallback((place: Place) => {
     setStops((s) => [...s, place]);
@@ -137,10 +152,11 @@ export function useTripPlanner(city: CityConfig) {
       distanceKm: selectedOptions.reduce((n, o) => n + o.distanceKm, 0),
       surgeProne: selectedOptions.some((o) => o.price.surgeProne),
     };
-  }, [selectedOptions]);
+  }, [selectedOptions, plans.length]);
 
   return {
     stops,
+    region,
     prefs,
     setPrefs,
     plans,

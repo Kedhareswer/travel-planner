@@ -1,9 +1,17 @@
 /**
- * Core domain types for the multimodal intra-city trip planner.
+ * Core domain types for the multimodal trip planner.
  *
- * The planner works on a list of Places (stops). For every consecutive pair
- * of stops (a Leg), it computes RouteOptions — one per viable mode — each
- * with a time estimate, a price band, and drawable geometry.
+ * The planner is region-agnostic: it works on a list of Places (stops)
+ * anywhere on Earth. For every consecutive pair of stops (a Leg) it
+ * computes RouteOptions — one per transport mode available in the region
+ * the stops are in — each with a time estimate, a price band in the local
+ * currency, and drawable geometry.
+ *
+ * Where a mode's data comes from decides its quality tier:
+ *   1. curated city packs (e.g. Hyderabad) — hand-checked networks & fares
+ *   2. live open data (Transitous scheduled transit, OSM rail networks)
+ *   3. country fare tables — heuristic but honest, wide coverage
+ *   4. global defaults — the planner never comes up empty
  */
 
 export type LngLat = [number, number]; // [longitude, latitude] — MapLibre order
@@ -11,41 +19,67 @@ export type LngLat = [number, number]; // [longitude, latitude] — MapLibre ord
 export interface Place {
   id: string;
   name: string;
-  /** Secondary line, e.g. locality / city */
+  /** Secondary line, e.g. locality / city / country */
   area?: string;
   lngLat: LngLat;
+  /** ISO-3166 alpha-2, lowercase, when known — drives region resolution */
+  countryCode?: string;
   /** Where this place came from — curated dataset or live geocoder */
   source: "local" | "photon";
 }
 
-/** Travel modes the planner can compare. */
-export type ModeId =
+/** Icon/semantic families; individual modes are open-ended data. */
+export type ModeKind =
   | "walk"
+  | "cycle" // own bicycle
+  | "scooter" // shared e-scooter
   | "metro"
+  | "train"
+  | "tram"
+  | "ferry"
   | "bus"
-  | "auto" // street-hailed auto rickshaw (meter)
-  | "uber-go" // hatchback cab
-  | "uber-auto"
-  | "uber-moto" // bike taxi
-  | "rapido-bike"
-  | "rapido-auto"
-  | "rapido-cab";
+  | "auto" // auto-rickshaw / tuk-tuk / bajaj
+  | "cab" // taxi & rideshare cars
+  | "bike"; // motorcycle taxi
 
-export type ModeKind = "walk" | "metro" | "bus" | "auto" | "cab" | "bike";
-
-export interface ModeMeta {
-  id: ModeId;
-  label: string;
-  kind: ModeKind;
-  provider?: "uber" | "rapido" | "street" | "public";
-  /** Accent color used for map polylines and badges */
-  color: string;
+/** Distance/time-based fare card, in the region's local currency. */
+export interface FareCard {
+  baseFare: number; // includes baseKm
+  baseKm: number;
+  perKm: number;
+  perMin?: number; // time component, if the operator charges one
+  minFare: number;
+  /** multiplier band applied on top (demand-pricing uncertainty) */
+  band: [number, number];
+  surgeProne: boolean;
+  notes?: string[];
 }
 
-/** A price band in INR. Estimates are ranges, never a false-precision number. */
+/**
+ * One bookable/usable transport mode in a region — an open catalog entry,
+ * not a closed enum: "uber-go", "grab-bike", "black-cab", "boda-boda"…
+ */
+export interface TransportMode {
+  id: string;
+  label: string;
+  kind: ModeKind;
+  /** provider id from lib/providers.ts, for deep links & branding */
+  provider?: string;
+  /** Accent color used for map polylines and badges */
+  color: string;
+  fare: FareCard;
+  /** wait-for-pickup band, minutes [low, high] */
+  pickupWaitMin?: [number, number];
+  /** don't offer beyond this distance (e.g. shared e-scooters) */
+  maxKm?: number;
+}
+
+/** A price band. Estimates are ranges, never a false-precision number. */
 export interface PriceBand {
   low: number;
   high: number;
+  /** ISO-4217 code the amounts are in */
+  currency: string;
   /** true when surge/night charges could push beyond `high` */
   surgeProne: boolean;
 }
@@ -65,7 +99,11 @@ export interface RouteStep {
 /** A complete way to travel one leg (stop i -> stop i+1). */
 export interface RouteOption {
   id: string;
-  mode: ModeId;
+  /** catalog mode id, or a synthetic id for transit itineraries */
+  mode: string;
+  label: string;
+  kind: ModeKind;
+  color: string;
   legIndex: number;
   summary: string;
   durationMin: { low: number; high: number };
@@ -77,13 +115,13 @@ export interface RouteOption {
   /** Deep link to book / open directions externally */
   bookingUrl?: string;
   bookingLabel?: string;
-  /** Caveats surfaced to the user (e.g. "fares revised Dec 2024", "peak surge likely") */
+  /** Caveats surfaced to the user */
   notes: string[];
-  /** True when road geometry came from OSRM; false = heuristic straight-line estimate */
-  roadGeometry: boolean;
+  /** "curated" | "live" | "estimated" — how trustworthy the data is */
+  dataTier: "curated" | "live" | "estimated";
 }
 
-/** All options for one leg, plus the picks. */
+/** All options for one leg, plus the Pareto set. */
 export interface LegPlan {
   from: Place;
   to: Place;
@@ -94,23 +132,17 @@ export interface LegPlan {
 }
 
 export interface TripPreferences {
-  /** Rupees the user assigns to one hour of their time; drives "best" ranking */
+  /** Local-currency value of one hour of the user's time; drives "best" ranking */
   valueOfTimePerHour: number;
   /** Max walk the user tolerates for a whole leg, km */
   maxWalkKm: number;
   /** Peak traffic changes road speeds & surge likelihood */
   peakHours: boolean;
-  /** Modes the user wants excluded */
-  excludedModes: ModeId[];
+  /** Mode ids (or kinds) the user wants excluded */
+  excludedModes: string[];
 }
 
-export interface TripPlan {
-  legs: LegPlan[];
-  /** Chosen option id per leg (defaults to "best") */
-  selected: Record<number, string>;
-}
-
-/* ------------------------------ City config ------------------------------ */
+/* ------------------------------ Transit data ----------------------------- */
 
 export interface MetroStation {
   id: string;
@@ -131,55 +163,63 @@ export interface MetroLine {
 export interface MetroNetwork {
   lines: MetroLine[];
   stations: Record<string, MetroStation>;
-  /** fare by number of km ridden — [maxKm, fareINR] slabs, ascending */
-  fareSlabsKm: [number, number][];
+  /** fare by km ridden — [maxKm, fare] slabs ascending; null = use region band */
+  fareSlabsKm: [number, number][] | null;
   /** average commercial speed incl. stops, km/h */
   commercialSpeedKmh: number;
   /** typical wait = headway / 2, minutes */
   avgWaitMin: number;
   /** minutes lost per interchange */
   interchangePenaltyMin: number;
-  firstTrain: string;
-  lastTrain: string;
+  firstTrain?: string;
+  lastTrain?: string;
 }
 
-/** Distance-based fare card for road modes. */
-export interface FareCard {
-  mode: ModeId;
-  baseFare: number; // includes baseKm
-  baseKm: number;
-  perKm: number;
-  perMin?: number; // time component, if the platform charges one
-  minFare: number;
-  /** multiplier band applied on top (demand pricing uncertainty) */
-  band: [number, number];
-  surgeProne: boolean;
-  notes?: string[];
-}
+/* ------------------------------ Region model ----------------------------- */
 
 export interface SpeedModel {
-  /** km/h by mode kind, [peak, offPeak] */
+  /** km/h by mode kind, [peak, offPeak] where banded */
   walk: number;
+  cycle: number;
   bike: [number, number];
   auto: [number, number];
   car: [number, number];
   bus: [number, number];
-  /** ratio of road distance to straight-line distance when OSRM is unavailable */
+  /** ratio of road distance to straight-line distance when routing is unavailable */
   detourIndex: number;
   busAvgWaitMin: number;
 }
 
-export interface CityConfig {
-  id: string;
-  name: string;
-  center: LngLat;
-  /** rough bounding box [west, south, east, north] used to bias geocoding */
-  bbox: [number, number, number, number];
-  metro?: MetroNetwork;
-  fareCards: FareCard[];
+/**
+ * Everything the planner needs to know about "here".
+ * Country profiles cover whole countries; curated city packs override them.
+ */
+export interface RegionProfile {
+  id: string; // "in", "us", "city:hyderabad", "default"
+  name: string; // "India", "United States", "Hyderabad"
+  /** ISO-3166 alpha-2 lowercase ("" for the global default) */
+  countryCode: string;
+  currency: string; // ISO 4217
+  /** BCP-47 locale used for currency formatting */
+  locale: string;
   speeds: SpeedModel;
-  /** curated searchable places for instant, offline-friendly autocomplete */
-  places: Omit<Place, "source">[];
-  /** bus fare slabs [maxKm, fareINR], ascending — city ordinary buses */
-  busFareSlabsKm: [number, number][];
+  /** road modes available here (taxis, rideshare, moto, auto…) */
+  roadModes: TransportMode[];
+  /** typical single-ride fare bands when no schedule/fare table exists */
+  transitFare: { metro: [number, number]; bus: [number, number] };
+  /** offer an own-bicycle option */
+  cycling: boolean;
+  /** presets for the "my time is worth" control, local currency per hour */
+  valueOfTimePresets: number[];
+  valueOfTimeDefault: number;
+  /** data quality: curated packs are hand-checked */
+  tier: "curated" | "country" | "default";
+
+  /* -------- curated-pack extras (optional) -------- */
+  metro?: MetroNetwork;
+  places?: Omit<Place, "source">[];
+  /** rough bbox [west, south, east, north] a pack applies to */
+  bbox?: [number, number, number, number];
+  busFareSlabsKm?: [number, number][];
+  notes?: string[];
 }

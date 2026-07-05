@@ -1,12 +1,15 @@
 "use client";
 
-import { Clock, Footprints, IndianRupee, Route } from "lucide-react";
+import { Clock, Footprints, Route, Wallet } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
-import { formatKm, formatMinRange, formatPrice } from "@/lib/geo";
+import { formatKm, formatMinRange } from "@/lib/geo";
+import { formatMoneyRange } from "@/lib/region";
+import type { RegionProfile } from "@/lib/types";
 
 /** Whole-trip totals across the selected option of every leg. */
 export function TripSummary({
   totals,
+  region,
 }: {
   totals: {
     priceLow: number;
@@ -17,6 +20,7 @@ export function TripSummary({
     distanceKm: number;
     surgeProne: boolean;
   };
+  region: RegionProfile;
 }) {
   return (
     <Card className="py-3">
@@ -27,9 +31,9 @@ export function TripSummary({
           value={formatMinRange(totals.minLow, totals.minHigh)}
         />
         <Stat
-          icon={<IndianRupee className="size-3.5" />}
+          icon={<Wallet className="size-3.5" />}
           label="Total cost"
-          value={`${formatPrice(totals.priceLow, totals.priceHigh)}${totals.surgeProne ? "*" : ""}`}
+          value={`${formatMoneyRange(totals.priceLow, totals.priceHigh, region)}${totals.surgeProne ? "*" : ""}`}
         />
         <Stat
           icon={<Route className="size-3.5" />}

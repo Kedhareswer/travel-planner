@@ -1,31 +1,42 @@
-import type { CityConfig, Place } from "./types";
+import { CURATED_PACKS } from "@/data/regions";
+import type { LngLat, Place } from "./types";
 
 /**
- * Place search: instant results from the city's curated dataset, augmented
- * by the Photon geocoder (OSM data, CORS-friendly, no API key) when online.
- * If the geocoder is unreachable the curated list keeps the app usable.
+ * Global place search: Photon (OSM geocoder, worldwide, no key, CORS) for
+ * everything, with curated pack places mixed in for instant results where
+ * we have them. Results carry ISO country codes, which drive region
+ * resolution. If the geocoder is unreachable, curated places keep the
+ * app usable.
  */
 
 const PHOTON = "https://photon.komoot.io/api/";
 let photonDownUntil = 0;
 
-export function searchLocal(city: CityConfig, query: string, limit = 6): Place[] {
+/** Instant results from curated pack datasets (e.g. Hyderabad landmarks). */
+export function searchLocal(query: string, limit = 5): Place[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
-  const scored = city.places
-    .map((p) => {
+  const scored: { p: Place; score: number }[] = [];
+  for (const pack of CURATED_PACKS) {
+    for (const p of pack.places ?? []) {
       const name = p.name.toLowerCase();
       const area = (p.area ?? "").toLowerCase();
       let score = -1;
       if (name.startsWith(q)) score = 3;
       else if (name.includes(q)) score = 2;
       else if (area.includes(q)) score = 1;
-      return { p, score };
-    })
-    .filter((s) => s.score >= 0)
+      if (score >= 0) {
+        scored.push({
+          p: { ...p, countryCode: pack.countryCode, source: "local" as const },
+          score,
+        });
+      }
+    }
+  }
+  return scored
     .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
-  return scored.map(({ p }) => ({ ...p, source: "local" as const }));
+    .slice(0, limit)
+    .map((s) => s.p);
 }
 
 interface PhotonFeature {
@@ -38,23 +49,22 @@ interface PhotonFeature {
     district?: string;
     city?: string;
     state?: string;
+    country?: string;
+    countrycode?: string;
   };
 }
 
 export async function searchPhoton(
-  city: CityConfig,
   query: string,
-  limit = 5,
+  bias?: LngLat,
+  limit = 6,
 ): Promise<Place[]> {
   if (Date.now() < photonDownUntil) return [];
-  const [w, s, e, n] = city.bbox;
-  const params = new URLSearchParams({
-    q: query,
-    limit: String(limit),
-    bbox: `${w},${s},${e},${n}`,
-    lat: String(city.center[1]),
-    lon: String(city.center[0]),
-  });
+  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  if (bias) {
+    params.set("lat", String(bias[1]));
+    params.set("lon", String(bias[0]));
+  }
   try {
     const res = await fetch(`${PHOTON}?${params}`, {
       signal: AbortSignal.timeout(3500),
@@ -67,10 +77,15 @@ export async function searchPhoton(
         id: `osm-${f.properties.osm_type ?? "X"}${f.properties.osm_id}`,
         name: f.properties.name!,
         area:
-          [f.properties.district, f.properties.city ?? f.properties.state]
+          [
+            f.properties.district ?? f.properties.street,
+            f.properties.city ?? f.properties.state,
+            f.properties.country,
+          ]
             .filter(Boolean)
             .join(", ") || undefined,
         lngLat: f.geometry.coordinates,
+        countryCode: f.properties.countrycode?.toLowerCase(),
         source: "photon" as const,
       }));
   } catch {
@@ -79,11 +94,11 @@ export async function searchPhoton(
   }
 }
 
-/** Merged search: curated first (instant), geocoder for the long tail. */
-export async function searchPlaces(city: CityConfig, query: string): Promise<Place[]> {
-  const local = searchLocal(city, query);
+/** Merged search: curated hits first (instant), the world via geocoder. */
+export async function searchPlaces(query: string, bias?: LngLat): Promise<Place[]> {
+  const local = searchLocal(query);
   if (query.trim().length < 3) return local;
-  const remote = await searchPhoton(city, query);
+  const remote = await searchPhoton(query, bias);
   const seen = new Set(local.map((p) => p.name.toLowerCase()));
   return [...local, ...remote.filter((p) => !seen.has(p.name.toLowerCase()))].slice(0, 8);
 }
