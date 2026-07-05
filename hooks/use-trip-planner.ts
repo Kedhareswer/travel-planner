@@ -42,9 +42,12 @@ export function useTripPlanner(city: CityConfig) {
   const runRef = useRef(0);
 
   const key = planKey(stops, prefs);
+  // Stale-while-revalidate: keep showing the previous plans while a replan
+  // is in flight (the header spinner signals staleness) instead of blanking
+  // the whole panel to skeletons on every stop/preference tweak.
   const plans = useMemo(
-    () => (stops.length >= 2 && result?.key === key ? result.plans : []),
-    [stops.length, result, key],
+    () => (stops.length >= 2 ? (result?.plans ?? []) : []),
+    [stops.length, result],
   );
   const planning = stops.length >= 2 && result?.key !== key;
 
@@ -146,7 +149,7 @@ export function useTripPlanner(city: CityConfig) {
   };
 }
 
-/** Option ids look like `${mode}-${leg}-${seq}` — extract the mode part. */
+/** Option ids look like `${mode}-${leg}` — extract the mode part. */
 function modeOf(id: string): string {
-  return id.split("-").slice(0, -2).join("-");
+  return id.split("-").slice(0, -1).join("-");
 }

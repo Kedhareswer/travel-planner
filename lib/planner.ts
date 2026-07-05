@@ -78,8 +78,9 @@ function rideMinutes(km: number, speed: SpeedBand, peak: boolean): { low: number
   return peak ? { low: (fast + slow) / 2, high: slow * 1.15 } : { low: fast, high: slow };
 }
 
-let optionSeq = 0;
-const oid = (mode: string, leg: number) => `${mode}-${leg}-${optionSeq++}`;
+// One option per mode per leg, so this id is unique AND stable across
+// replans — React keys and the user's selection survive recomputation.
+const oid = (mode: string, leg: number) => `${mode}-${leg}`;
 
 /** Build every option for one leg. Road geometry is fetched once and shared. */
 export async function planLeg(

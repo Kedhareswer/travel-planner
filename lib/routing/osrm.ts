@@ -22,8 +22,9 @@ export interface RoadRoute {
 const OSRM_BASE = "https://router.project-osrm.org/route/v1/driving";
 const TIMEOUT_MS = 4000;
 
-// Session-scoped cache: same leg gets asked for repeatedly as the user tweaks.
-const cache = new Map<string, RoadRoute>();
+// Session-scoped cache of in-flight/settled requests — overlapping replans
+// of the same leg coalesce onto one fetch instead of hitting OSRM repeatedly.
+const cache = new Map<string, Promise<RoadRoute>>();
 // After a hard failure, stop hammering the server for a while.
 let osrmDownUntil = 0;
 
@@ -43,7 +44,25 @@ export function heuristicRoad(a: LngLat, b: LngLat, detourIndex: number): RoadRo
   };
 }
 
-export async function roadRoute(
+async function fetchOsrm(a: LngLat, b: LngLat): Promise<RoadRoute> {
+  const url = `${OSRM_BASE}/${a[0]},${a[1]};${b[0]},${b[1]}?overview=full&alternatives=false&steps=false`;
+  const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
+  if (!res.ok) throw new Error(`OSRM ${res.status}`);
+  const data = (await res.json()) as {
+    code: string;
+    routes?: { distance: number; duration: number; geometry: string }[];
+  };
+  const route = data.routes?.[0];
+  if (data.code !== "Ok" || !route) throw new Error(`OSRM code ${data.code}`);
+  return {
+    distanceKm: route.distance / 1000,
+    durationMin: route.duration / 60,
+    geometry: decodePolyline(route.geometry),
+    fromOsrm: true,
+  };
+}
+
+export function roadRoute(
   a: LngLat,
   b: LngLat,
   detourIndex: number,
@@ -52,28 +71,15 @@ export async function roadRoute(
   const hit = cache.get(k);
   if (hit) return hit;
 
-  if (Date.now() < osrmDownUntil) return heuristicRoad(a, b, detourIndex);
-
-  try {
-    const url = `${OSRM_BASE}/${a[0]},${a[1]};${b[0]},${b[1]}?overview=full&alternatives=false&steps=false`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) });
-    if (!res.ok) throw new Error(`OSRM ${res.status}`);
-    const data = (await res.json()) as {
-      code: string;
-      routes?: { distance: number; duration: number; geometry: string }[];
-    };
-    const route = data.routes?.[0];
-    if (data.code !== "Ok" || !route) throw new Error(`OSRM code ${data.code}`);
-    const out: RoadRoute = {
-      distanceKm: route.distance / 1000,
-      durationMin: route.duration / 60,
-      geometry: decodePolyline(route.geometry),
-      fromOsrm: true,
-    };
-    cache.set(k, out);
-    return out;
-  } catch {
-    osrmDownUntil = Date.now() + 60_000;
-    return heuristicRoad(a, b, detourIndex);
+  if (Date.now() < osrmDownUntil) {
+    return Promise.resolve(heuristicRoad(a, b, detourIndex));
   }
+
+  const p = fetchOsrm(a, b).catch(() => {
+    osrmDownUntil = Date.now() + 60_000;
+    cache.delete(k); // don't pin the fallback — retry OSRM after the backoff
+    return heuristicRoad(a, b, detourIndex);
+  });
+  cache.set(k, p);
+  return p;
 }

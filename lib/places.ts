@@ -32,6 +32,7 @@ interface PhotonFeature {
   geometry: { coordinates: [number, number] };
   properties: {
     osm_id: number;
+    osm_type?: string; // N | W | R — needed to make ids unique across types
     name?: string;
     street?: string;
     district?: string;
@@ -63,7 +64,7 @@ export async function searchPhoton(
     return data.features
       .filter((f) => f.properties.name)
       .map((f) => ({
-        id: `osm-${f.properties.osm_id}`,
+        id: `osm-${f.properties.osm_type ?? "X"}${f.properties.osm_id}`,
         name: f.properties.name!,
         area:
           [f.properties.district, f.properties.city ?? f.properties.state]

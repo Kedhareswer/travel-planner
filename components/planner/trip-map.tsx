@@ -39,8 +39,18 @@ export function TripMap({
     return pts;
   }, [stops, selectedOptions]);
 
+  const stopsKey = useMemo(
+    () => JSON.stringify(stops.map((s) => s.lngLat)),
+    [stops],
+  );
+  const lastStopsKey = useRef("");
+
   useEffect(() => {
     if (!mapRef.current || allPoints.length < 2) return;
+    // Mid-replan the selection briefly empties; don't refit for that —
+    // only when the stops themselves changed or new routes arrived.
+    if (stopsKey === lastStopsKey.current && selectedOptions.length === 0) return;
+    lastStopsKey.current = stopsKey;
     const [w, s, e, n] = bboxOf(allPoints, 0.004);
     mapRef.current.fitBounds(
       [
@@ -49,7 +59,7 @@ export function TripMap({
       ],
       { padding: 56, maxZoom: 15, duration: 700 },
     );
-  }, [allPoints]);
+  }, [allPoints, stopsKey, selectedOptions.length]);
 
   const metroStations = useMemo(
     () => (city.metro ? Object.values(city.metro.stations) : []),
