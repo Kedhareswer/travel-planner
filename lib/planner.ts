@@ -174,24 +174,25 @@ export async function planLeg(
 
   // ---- Metro (with access/egress legs) ----
   if (city.metro && !prefs.excludedModes.includes("metro")) {
-    const metroOpt = buildMetroOption(city, from, to, legIndex);
+    const metroOpt = buildMetroOption(city, from, to, legIndex, prefs);
     if (metroOpt) options.push(metroOpt);
   }
 
   // ---- Bus (indicative) ----
   if (!prefs.excludedModes.includes("bus") && roadKm >= 1.5) {
+    const busKm = roadKm * 1.1; // buses detour via stops
     const speed = speedFor(city, "bus");
-    const ride = rideMinutes(roadKm * 1.1, speed, prefs.peakHours); // buses detour via stops
+    const ride = rideMinutes(busKm, speed, prefs.peakHours);
     const wait = city.speeds.busAvgWaitMin;
-    const fare = slabFare(city.busFareSlabsKm, roadKm);
+    const fare = slabFare(city.busFareSlabsKm, busKm);
     options.push({
       id: oid("bus", legIndex),
       mode: "bus",
       legIndex,
-      summary: `~${formatKm(roadKm * 1.1)} by bus`,
+      summary: `~${formatKm(busKm)} by bus`,
       durationMin: { low: ride.low + wait * 0.6, high: ride.high + wait * 1.6 },
       price: { low: fare, high: Math.round(fare * 1.6), surgeProne: false },
-      distanceKm: roadKm * 1.1,
+      distanceKm: busKm,
       walkKm: 0.4,
       transfers: 0,
       steps: [
@@ -200,7 +201,7 @@ export async function planLeg(
           kind: "bus",
           label: `Bus toward ${to.name}`,
           detail: "Route availability varies",
-          distanceKm: roadKm * 1.1,
+          distanceKm: busKm,
           durationMin: (ride.low + ride.high) / 2,
           geometry: road.geometry,
         },
@@ -242,11 +243,14 @@ function buildMetroOption(
   from: Place,
   to: Place,
   legIndex: number,
+  prefs: TripPreferences,
 ): RouteOption | null {
   const net = city.metro!;
   const entries = nearestStations(net, from.lngLat, 2);
   const exits = nearestStations(net, to.lngLat, 2);
   if (!entries.length || !exits.length) return null;
+  // The user's walk tolerance also bounds each station access walk.
+  const stationWalkMax = Math.min(STATION_WALK_MAX_KM, prefs.maxWalkKm);
 
   // Try the nearest pair combinations, keep the best total time.
   let best: {
@@ -278,9 +282,11 @@ function buildMetroOption(
   if (!best) return null;
   const { ride, entryKm, exitKm } = best;
 
-  // Metro only makes sense if the ride is a meaningful part of the journey.
+  // Metro only makes sense if the ride is a meaningful part of the journey:
+  // not for sub-km hops (walk/auto dominate and a 1-stop ride trivially
+  // passes a ratio test), and not when most of the trip is access/egress.
   const crowKm = haversineKm(from.lngLat, to.lngLat);
-  if (ride.distanceKm < crowKm * 0.45) return null;
+  if (crowKm < 1 || ride.distanceKm < 1 || ride.distanceKm < crowKm * 0.45) return null;
 
   const steps: RouteStep[] = [];
   const notes: string[] = [];
@@ -289,7 +295,7 @@ function buildMetroOption(
   let walkTotal = 0;
 
   // Access leg
-  const access = accessLeg(city, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} Metro`);
+  const access = accessLeg(city, from.lngLat, ride.entry.lngLat, entryKm, `${ride.entry.name} Metro`, stationWalkMax);
   steps.push(access.step);
   priceLow += access.price.low;
   priceHigh += access.price.high;
@@ -304,8 +310,17 @@ function buildMetroOption(
     geometry: [],
   });
 
-  // Ride segments (colored per line)
-  for (const seg of ride.segments) {
+  // Ride segments (colored per line), with interchanges as explicit steps
+  ride.segments.forEach((seg, i) => {
+    if (i > 0) {
+      steps.push({
+        kind: "transfer",
+        label: `Interchange at ${seg.stations[0].name}`,
+        distanceKm: 0,
+        durationMin: net.interchangePenaltyMin,
+        geometry: [],
+      });
+    }
     steps.push({
       kind: "metro",
       label: `${seg.line.name} · ${seg.stations[0].name} → ${seg.stations[seg.stations.length - 1].name}`,
@@ -315,11 +330,11 @@ function buildMetroOption(
       geometry: seg.stations.map((s) => s.lngLat),
       color: seg.line.color,
     });
-  }
+  });
   if (ride.transfers > 0) notes.push(`${ride.transfers} interchange${ride.transfers > 1 ? "s" : ""}`);
 
   // Egress leg
-  const egress = accessLeg(city, ride.exit.lngLat, to.lngLat, exitKm, to.name);
+  const egress = accessLeg(city, ride.exit.lngLat, to.lngLat, exitKm, to.name, stationWalkMax);
   steps.push(egress.step);
   priceLow += egress.price.low;
   priceHigh += egress.price.high;
@@ -338,7 +353,12 @@ function buildMetroOption(
     legIndex,
     summary: `${ride.entry.name} → ${ride.exit.name}`,
     durationMin: { low, high },
-    price: { low: Math.round(priceLow), high: Math.round(priceHigh), surgeProne: false },
+    price: {
+      low: Math.round(priceLow),
+      high: Math.round(priceHigh),
+      // The metro fare is fixed, but an auto access/egress leg is not.
+      surgeProne: access.price.surgeProne || egress.price.surgeProne,
+    },
     distanceKm: ride.distanceKm + entryKm + exitKm,
     walkKm: walkTotal,
     transfers: ride.transfers,
@@ -357,6 +377,7 @@ function accessLeg(
   to: [number, number],
   crowKm: number,
   destLabel: string,
+  walkMaxKm: number,
 ): {
   step: RouteStep;
   price: PriceBand;
@@ -364,7 +385,7 @@ function accessLeg(
   walkKm: number;
 } {
   const walkKm = crowKm * 1.25;
-  if (walkKm <= STATION_WALK_MAX_KM) {
+  if (walkKm <= walkMaxKm) {
     const mins = (walkKm / city.speeds.walk) * 60;
     return {
       step: {
