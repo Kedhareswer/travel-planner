@@ -60,10 +60,15 @@ export async function searchPhoton(
   limit = 6,
 ): Promise<Place[]> {
   if (Date.now() < photonDownUntil) return [];
-  const params = new URLSearchParams({ q: query, limit: String(limit) });
+  const params = new URLSearchParams({ q: query, limit: String(limit + 4) });
   if (bias) {
     params.set("lat", String(bias[1]));
     params.set("lon", String(bias[0]));
+    // Photon's default bias barely nudges the ranking — weight proximity
+    // hard so "D Mart" from Madanapalle finds the one nearby, not the
+    // better-known one in Bengaluru.
+    params.set("zoom", "13");
+    params.set("location_bias_scale", "0.7");
   }
   try {
     const res = await fetch(`${PHOTON}?${params}`, {
@@ -71,23 +76,33 @@ export async function searchPhoton(
     });
     if (!res.ok) throw new Error(`photon ${res.status}`);
     const data = (await res.json()) as { features: PhotonFeature[] };
-    return data.features
-      .filter((f) => f.properties.name)
-      .map((f) => ({
+    const seen = new Set<string>();
+    const out: Place[] = [];
+    for (const f of data.features) {
+      if (!f.properties.name) continue;
+      const area =
+        [
+          f.properties.district ?? f.properties.street,
+          f.properties.city ?? f.properties.state,
+          f.properties.country,
+        ]
+          .filter(Boolean)
+          .join(", ") || undefined;
+      // OSM often has the same POI as node + way — show it once.
+      const dupKey = `${f.properties.name.toLowerCase()}|${area?.toLowerCase() ?? ""}`;
+      if (seen.has(dupKey)) continue;
+      seen.add(dupKey);
+      out.push({
         id: `osm-${f.properties.osm_type ?? "X"}${f.properties.osm_id}`,
-        name: f.properties.name!,
-        area:
-          [
-            f.properties.district ?? f.properties.street,
-            f.properties.city ?? f.properties.state,
-            f.properties.country,
-          ]
-            .filter(Boolean)
-            .join(", ") || undefined,
+        name: f.properties.name,
+        area,
         lngLat: f.geometry.coordinates,
         countryCode: f.properties.countrycode?.toLowerCase(),
         source: "photon" as const,
-      }));
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
   } catch {
     photonDownUntil = Date.now() + 60_000;
     return [];

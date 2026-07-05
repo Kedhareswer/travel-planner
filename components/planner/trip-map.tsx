@@ -22,10 +22,13 @@ export function TripMap({
   region,
   stops,
   selectedOptions,
+  onCenterChange,
 }: {
   region: RegionProfile;
   stops: Place[];
   selectedOptions: RouteOption[];
+  /** reports the map center so search can bias toward what's on screen */
+  onCenterChange?: (center: [number, number]) => void;
 }) {
   const mapRef = useRef<MapRef>(null);
 
@@ -45,7 +48,15 @@ export function TripMap({
   const lastStopsKey = useRef("");
 
   useEffect(() => {
-    if (!mapRef.current || allPoints.length < 2) return;
+    if (!mapRef.current) return;
+    // A single stop (e.g. "Start from my location") flies straight there.
+    if (stops.length === 1) {
+      if (stopsKey === lastStopsKey.current) return;
+      lastStopsKey.current = stopsKey;
+      mapRef.current.flyTo({ center: stops[0].lngLat, zoom: 13, duration: 900 });
+      return;
+    }
+    if (allPoints.length < 2) return;
     // Mid-replan the selection briefly empties; don't refit for that —
     // only when the stops themselves changed or new routes arrived.
     if (stopsKey === lastStopsKey.current && selectedOptions.length === 0) return;
@@ -58,7 +69,7 @@ export function TripMap({
       ],
       { padding: 56, maxZoom: 15, duration: 700 },
     );
-  }, [allPoints, stopsKey, selectedOptions.length]);
+  }, [allPoints, stops, stopsKey, selectedOptions.length]);
 
   const curatedStations = useMemo(
     () => (region.metro ? Object.values(region.metro.stations) : []),
@@ -66,7 +77,13 @@ export function TripMap({
   );
 
   return (
-    <Map ref={mapRef} center={[20, 12]} zoom={1.6} attributionControl={{ compact: true }}>
+    <Map
+      ref={mapRef}
+      center={[20, 12]}
+      zoom={1.6}
+      attributionControl={{ compact: true }}
+      onViewportChange={(v) => onCenterChange?.(v.center)}
+    >
       <MapControls position="bottom-right" showZoom showLocate />
 
       {/* Curated network stations as subtle orientation dots */}

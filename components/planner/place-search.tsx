@@ -13,13 +13,16 @@ import type { LngLat, Place } from "@/lib/types";
  * so it works inside any layout.
  */
 export function PlaceSearch({
-  bias,
+  getBias,
   onSelect,
   placeholder = "Search any place, anywhere…",
   autoFocus,
 }: {
-  /** bias results toward here (e.g. the previous stop) */
-  bias?: LngLat;
+  /**
+   * Where to bias results toward, read fresh at search time (e.g. the
+   * previous stop, or wherever the map is currently looking).
+   */
+  getBias?: () => LngLat | undefined;
   onSelect: (place: Place) => void;
   placeholder?: string;
   autoFocus?: boolean;
@@ -45,12 +48,12 @@ export function PlaceSearch({
     if (query.trim().length < 3) return;
     const run = ++seq.current;
     const t = setTimeout(async () => {
-      const places = await searchPlaces(query, bias);
+      const places = await searchPlaces(query, getBias?.());
       if (run !== seq.current) return;
       setMerged({ q: query, places });
     }, 250);
     return () => clearTimeout(t);
-  }, [bias, query]);
+  }, [getBias, query]);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {

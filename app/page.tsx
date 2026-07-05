@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import {
   ChevronDown,
   Globe2,
@@ -56,8 +56,16 @@ const SAMPLES: { label: string; stops: Omit<Place, "source">[] }[] = [
 
 export default function Home() {
   const planner = useTripPlanner();
-  const { region, addStop } = planner;
+  const { region, addStop, stops } = planner;
   const [locating, setLocating] = useState(false);
+
+  // Search bias, freshest first: the trip's last stop, else wherever the
+  // map is currently looking (a ref so panning doesn't re-render the page).
+  const mapCenterRef = useRef<[number, number] | undefined>(undefined);
+  const getSearchBias = useCallback(
+    () => stops[stops.length - 1]?.lngLat ?? mapCenterRef.current,
+    [stops],
+  );
 
   const loadSample = (stops: Omit<Place, "source">[]) => {
     planner.clearStops();
@@ -115,7 +123,7 @@ export default function Home() {
             <div className="flex gap-1.5">
               <div className="min-w-0 flex-1">
                 <PlaceSearch
-                  bias={planner.stops[planner.stops.length - 1]?.lngLat}
+                  getBias={getSearchBias}
                   onSelect={planner.addStop}
                   placeholder={
                     planner.stops.length === 0
@@ -228,6 +236,7 @@ export default function Home() {
             region={region}
             stops={planner.stops}
             selectedOptions={planner.selectedOptions}
+            onCenterChange={(c) => (mapCenterRef.current = c)}
           />
         </main>
       </div>
